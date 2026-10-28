@@ -1,0 +1,264 @@
+import os
+import json
+import logging
+import asyncio
+from datetime import datetime
+import pandas as pd
+import numpy as np
+import yfinance as yf
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters,
+    ConversationHandler
+)
+
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "8645159870:AAFYBPwClDyFactd2Nls0s9B7Xpw3S5MMf0").strip()
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "942878993").strip()
+
+PORTFOLIO_FILE = "portfolio.json"
+ATTESA_DETTAGLI_ACQUISTO = 1
+
+PANIERE = {
+    "ENEL.MI": "Enel",
+    "ISP.MI": "Intesa Sanpaolo",
+    "UCG.MI": "UniCredit",
+    "ENI.MI": "Eni",
+    "STLAM.MI": "Stellantis",
+    "RACE.MI": "Ferrari",
+    "G.MI": "Generali",
+    "SWDA.MI": "iShares MSCI World (SWDA)",
+    "CSSPX.MI": "iShares S&P 500 (CSSPX)",
+    "XEON.MI": "Xtrackers Overnight €STR (XEON)"
+}
+
+def carica_portafoglio():
+    if os.path.exists(PORTFOLIO_FILE):
+        try:
+            with open(PORTFOLIO_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return {}
+    return {}
+
+def salva_portafoglio(data):
+    with open(PORTFOLIO_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+async def esegui_scansione_e_monitoraggio(app):
+    portafoglio = carica_portafoglio()
+    
+    # 1. Monitoraggio posizioni aperte (Take Profit / Stop Loss)
+    for ticker, info in list(portafoglio.items()):
+        try:
+            d = yf.download(ticker, period="5d", interval="1d", progress=False)
+            if d.empty: 
+                continue
+            if isinstance(d.columns, pd.MultiIndex): 
+                d.columns = d.columns.get_level_values(0)
+            
+            p_live = float(d['Close'].iloc[-1])
+            pmc = info['pmc']
+            quote = info['quote']
+            rend_pct = ((p_live - pmc) / pmc) * 100
+            
+            if rend_pct >= 6.0 or rend_pct <= -4.0:
+                tipo = "🎯 TAKE PROFIT (+6%)" if rend_pct >= 6.0 else "⚠️ STOP LOSS (-4%)"
+                tastiera = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Venduto su Directa", callback_data=f"venduto_{ticker}"),
+                     InlineKeyboardButton("⏳ Tieni Posizione", callback_data=f"tieni_{ticker}")]
+                ])
+                msg = (
+                    f"🔔 <b>SEGNALE DI USCITA: {info['nome']} ({ticker})</b>\n\n"
+                    f"• Condizione: <b>{tipo}</b>\n"
+                    f"• Prezzo di Carico (PMC): <code>€{pmc:.2f}</code>\n"
+                    f"• Prezzo Attuale: <code>€{p_live:.2f}</code>\n"
+                    f"• Performance: <b>{rend_pct:+.2f}%</b>\n"
+                    f"• Quantità: <code>{quote} quote</code>\n\n"
+                    f"Hai chiuso l'operazione su Directa?"
+                )
+                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML', reply_markup=tastiera)
+        except Exception as e:
+            logging.error(f"Errore monitoraggio {ticker}: {e}")
+
+    # 2. Ricerca nuovi ingressi
+    for ticker, nome in PANIERE.items():
+        if ticker in portafoglio:
+            continue
+        try:
+            df = yf.download(ticker, period="1y", interval="1d", progress=False)
+            if df.empty or len(df) < 60: 
+                continue
+            if isinstance(df.columns, pd.MultiIndex): 
+                df.columns = df.columns.get_level_values(0)
+            
+            close = df['Close']
+            p_curr = float(close.iloc[-1])
+            sma20 = float(close.rolling(20).mean().iloc[-1])
+            sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float(close.rolling(50).mean().iloc[-1])
+            std20 = float(close.rolling(20).std().iloc[-1])
+            z_score = (p_curr - sma20) / std20 if std20 > 0 else 0.0
+            
+            delta = close.diff()
+            g = (delta.where(delta > 0, 0)).rolling(14).mean()
+            l = (-delta.where(delta < 0, 0)).rolling(14).mean()
+            rsi = float(100 - (100 / (1 + (g / l))).iloc[-1])
+            
+            score = 50.0
+            if z_score <= -2.0: score += 25
+            elif z_score <= -1.0: score += 12
+            elif z_score >= 2.0: score -= 20
+            
+            if rsi < 32: score += 20
+            elif rsi < 42: score += 10
+            elif rsi > 70: score -= 20
+            
+            if p_curr > sma200: score += 10
+            else: score -= 15
+            
+            score = int(np.clip(score, 0, 100))
+            
+            if score >= 60:
+                tastiera = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Ho Comprato", callback_data=f"buy_{ticker}_{p_curr:.2f}"),
+                     InlineKeyboardButton("❌ Ignora", callback_data=f"ignora_{ticker}")]
+                ])
+                testo = (
+                    f"📢 <b>OPPORTUNITÀ INGRESSO DIRECTA</b>\n\n"
+                    f"🔹 <b>{nome}</b> (<code>{ticker}</code>)\n"
+                    f"• Ultimo Prezzo: <code>€{p_curr:.2f}</code>\n"
+                    f"• Score Statistico: <b>{score}/100</b>\n"
+                    f"• RSI: <code>{rsi:.1f}</code> | Z-Score: <code>{z_score:+.2f}σ</code>\n\n"
+                    f"Hai eseguito l'acquisto su Directa?"
+                )
+                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo, parse_mode='HTML', reply_markup=tastiera)
+        except Exception:
+            continue
+
+async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data.startswith("buy_"):
+        _, ticker, prezzo = data.split("_")
+        context.user_data['pending_ticker'] = ticker
+        context.user_data['pending_prezzo'] = float(prezzo)
+        context.user_data['nome_titolo'] = PANIERE.get(ticker, ticker)
+        
+        await query.edit_message_text(
+            f"👍 Segnale confermato per <b>{context.user_data['nome_titolo']}</b>!\n\n"
+            f"✍️ <b>Quante quote hai comprato e a che prezzo?</b>\n"
+            f"Rispondi qui scrivendo ad esempio: <code>3 a {prezzo}</code>",
+            parse_mode='HTML'
+        )
+        return ATTESA_DETTAGLI_ACQUISTO
+        
+    elif data.startswith("ignora_"):
+        _, ticker = data.split("_")
+        await query.edit_message_text(f"Segnale per {ticker} ignorato.")
+        return ConversationHandler.END
+
+    elif data.startswith("venduto_"):
+        _, ticker = data.split("_")
+        portafoglio = carica_portafoglio()
+        if ticker in portafoglio:
+            del portafoglio[ticker]
+            salva_portafoglio(portafoglio)
+            await query.edit_message_text(f"✅ Posizione su <b>{ticker}</b> chiusa e rimossa dal monitoraggio.", parse_mode='HTML')
+        return ConversationHandler.END
+
+    elif data.startswith("tieni_"):
+        _, ticker = data.split("_")
+        await query.edit_message_text(f"⏳ Posizione su {ticker} mantenuta in portafoglio.", parse_mode='HTML')
+        return ConversationHandler.END
+
+async def registra_dettagli_acquisto(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    testo = update.message.text.lower().replace(",", ".")
+    ticker = context.user_data.get('pending_ticker')
+    nome = context.user_data.get('nome_titolo', ticker)
+    
+    try:
+        parti = [p for p in testo.replace("a", " ").split() if p]
+        quote = int(parti[0])
+        pmc = float(parti[1])
+        
+        portafoglio = carica_portafoglio()
+        portafoglio[ticker] = {
+            "nome": nome,
+            "quote": quote,
+            "pmc": pmc,
+            "data": datetime.now().strftime("%Y-%m-%d %H:%M")
+        }
+        salva_portafoglio(portafoglio)
+        
+        await update.message.reply_text(
+            f"✅ <b>REGISTRATO CON SUCCESSO!</b>\n\n"
+            f"• Titolo: <b>{nome}</b>\n"
+            f"• Quantità: <code>{quote} quote</code>\n"
+            f"• Prezzo Medio di Carico: <code>€{pmc:.2f}</code>\n"
+            f"• Controvalore totale: <code>€{quote * pmc:.2f}</code>\n\n"
+            f"🔍 Monitoraggio attivo: ti avviserò con un messaggio quando sarà il momento di vendere.",
+            parse_mode='HTML'
+        )
+    except Exception:
+        await update.message.reply_text(
+            "⚠️ Formato non riconosciuto. Scrivimi nel formato: <code>3 a 6.40</code>",
+            parse_mode='HTML'
+        )
+        return ATTESA_DETTAGLI_ACQUISTO
+        
+    return ConversationHandler.END
+
+async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    portafoglio = carica_portafoglio()
+    if not portafoglio:
+        await update.message.reply_text("📭 Nessun titolo attualmente monitorato nel portafoglio.")
+        return
+        
+    msg = "💼 <b>PORTAFOGLIO ATTIVO IN MONITORAGGIO:</b>\n\n"
+    for t, info in portafoglio.items():
+        msg += f"🔹 <b>{info['nome']}</b>: {info['quote']} quote @ €{info['pmc']:.2f} (inserito il {info['data'][:10]})\n"
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Avvio scansione di Borsa Italiana...")
+    await esegui_scansione_e_monitoraggio(context.application)
+
+async def task_schedulato(app):
+    while True:
+        now = datetime.now()
+        if now.weekday() < 5 and now.hour == 18 and now.minute == 0:
+            await esegui_scansione_e_monitoraggio(app)
+            await asyncio.sleep(65)
+        await asyncio.sleep(30)
+
+def main():
+    app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CallbackQueryHandler(bottone_callback)],
+        states={
+            ATTESA_DETTAGLI_ACQUISTO: [MessageHandler(filters.TEXT & ~filters.COMMAND, registra_dettagli_acquisto)]
+        },
+        fallbacks=[]
+    )
+    
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("portafoglio", cmd_portafoglio))
+    app.add_handler(CommandHandler("scan", cmd_scan))
+    
+    loop = asyncio.get_event_loop()
+    loop.create_task(task_schedulato(app))
+    
+    print("🤖 Bot Telegram avviato e in ascolto...")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()
