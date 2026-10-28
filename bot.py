@@ -3,6 +3,8 @@ import json
 import logging
 import asyncio
 from datetime import datetime, time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -37,6 +39,23 @@ PANIERE = {
     "CSSPX.MI": "iShares S&P 500 (CSSPX)",
     "XEON.MI": "Xtrackers Overnight €STR (XEON)"
 }
+
+# --- Mini Server Web per soddisfare Render Health Check ---
+class SimpleWebServer(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Bot Directa Online")
+
+    def log_message(self, format, *args):
+        return
+
+def avvia_server_porta():
+    porta = int(os.environ.get("PORT", 10000))
+    server = HTTPServer(("0.0.0.0", porta), SimpleWebServer)
+    logging.info(f"Server web attivo sulla porta {porta}")
+    server.serve_forever()
 
 def carica_portafoglio():
     if os.path.exists(PORTFOLIO_FILE):
@@ -142,7 +161,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             continue
 
 async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
-    # Controllo feriale lunedì-venerdì
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
 
@@ -237,6 +255,9 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await esegui_scansione_e_monitoraggio(context.bot)
 
 def main():
+    # Avvio thread del server web di supporto per Render
+    threading.Thread(target=avvia_server_porta, daemon=True).start()
+
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     
     conv_handler = ConversationHandler(
@@ -251,7 +272,6 @@ def main():
     app.add_handler(CommandHandler("portafoglio", cmd_portafoglio))
     app.add_handler(CommandHandler("scan", cmd_scan))
     
-    # Schedulazione interna nativa alle 18:00 CET feriali
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
     
