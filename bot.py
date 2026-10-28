@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import asyncio
-from datetime import datetime
+from datetime import datetime, time
 import pandas as pd
 import numpy as np
 import yfinance as yf
@@ -51,7 +51,7 @@ def salva_portafoglio(data):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
-async def esegui_scansione_e_monitoraggio(app):
+async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
     
     # 1. Monitoraggio posizioni aperte (Take Profit / Stop Loss)
@@ -83,7 +83,7 @@ async def esegui_scansione_e_monitoraggio(app):
                     f"• Quantità: <code>{quote} quote</code>\n\n"
                     f"Hai chiuso l'operazione su Directa?"
                 )
-                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML', reply_markup=tastiera)
+                await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML', reply_markup=tastiera)
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
@@ -137,9 +137,14 @@ async def esegui_scansione_e_monitoraggio(app):
                     f"• RSI: <code>{rsi:.1f}</code> | Z-Score: <code>{z_score:+.2f}σ</code>\n\n"
                     f"Hai eseguito l'acquisto su Directa?"
                 )
-                await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo, parse_mode='HTML', reply_markup=tastiera)
+                await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo, parse_mode='HTML', reply_markup=tastiera)
         except Exception:
             continue
+
+async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
+    # Controllo feriale lunedì-venerdì
+    if datetime.now().weekday() < 5:
+        await esegui_scansione_e_monitoraggio(context.bot)
 
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -155,7 +160,7 @@ async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"👍 Segnale confermato per <b>{context.user_data['nome_titolo']}</b>!\n\n"
             f"✍️ <b>Quante quote hai comprato e a che prezzo?</b>\n"
-            f"Rispondi qui scrivendo ad esempio: <code>3 a {prezzo}</code>",
+            f"Rispondi scrivendo ad esempio: <code>3 a {prezzo}</code>",
             parse_mode='HTML'
         )
         return ATTESA_DETTAGLI_ACQUISTO
@@ -229,15 +234,7 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Avvio scansione di Borsa Italiana...")
-    await esegui_scansione_e_monitoraggio(context.application)
-
-async def task_schedulato(app):
-    while True:
-        now = datetime.now()
-        if now.weekday() < 5 and now.hour == 18 and now.minute == 0:
-            await esegui_scansione_e_monitoraggio(app)
-            await asyncio.sleep(65)
-        await asyncio.sleep(30)
+    await esegui_scansione_e_monitoraggio(context.bot)
 
 def main():
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -254,8 +251,9 @@ def main():
     app.add_handler(CommandHandler("portafoglio", cmd_portafoglio))
     app.add_handler(CommandHandler("scan", cmd_scan))
     
-    loop = asyncio.get_event_loop()
-    loop.create_task(task_schedulato(app))
+    # Schedulazione interna nativa alle 18:00 CET feriali
+    if app.job_queue:
+        app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
     
     print("🤖 Bot Telegram avviato e in ascolto...")
     app.run_polling()
