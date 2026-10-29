@@ -40,7 +40,6 @@ PANIERE = {
     "XEON.MI": "Xtrackers Overnight €STR (XEON)"
 }
 
-# --- Mini Server Web per soddisfare Render Health Check ---
 class SimpleWebServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -107,6 +106,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
     # 2. Ricerca nuovi ingressi
+    trovati = 0
     for ticker, nome in PANIERE.items():
         if ticker in portafoglio:
             continue
@@ -144,6 +144,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             score = int(np.clip(score, 0, 100))
             
             if score >= 60:
+                trovati += 1
                 tastiera = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Ho Comprato", callback_data=f"buy_{ticker}_{p_curr:.2f}"),
                      InlineKeyboardButton("❌ Ignora", callback_data=f"ignora_{ticker}")]
@@ -159,10 +160,59 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo, parse_mode='HTML', reply_markup=tastiera)
         except Exception:
             continue
+            
+    if trovati == 0:
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun titolo con score ≥ 60 al momento.")
 
 async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
+
+async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Permette di registrare un acquisto manuale: es. /compra ISP.MI 3 5.99"""
+    args = context.args
+    if len(args) < 3:
+        await update.message.reply_text(
+            "⚠️ <b>Formato comando non corretto!</b>\n\n"
+            "Usa il formato:\n"
+            "<code>/compra TICKER QUANTITÀ PREZZO</code>\n\n"
+            "Esempio pratico:\n"
+            "<code>/compra ISP.MI 3 5.99</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    ticker_raw = args[0].upper().strip()
+    ticker = ticker_raw if ticker_raw.endswith(".MI") else f"{ticker_raw}.MI"
+    
+    try:
+        quote = int(args[1])
+        pmc = float(args[2].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("⚠️ Quantità o prezzo non validi. Esempio: <code>/compra ISP.MI 3 5.99</code>", parse_mode='HTML')
+        return
+
+    nome = PANIERE.get(ticker, ticker)
+    portafoglio = carica_portafoglio()
+    portafoglio[ticker] = {
+        "nome": nome,
+        "quote": quote,
+        "pmc": pmc,
+        "data": datetime.now().strftime("%Y-%m-%d %H:%M")
+    }
+    salva_portafoglio(portafoglio)
+
+    await update.message.reply_text(
+        f"✅ <b>ACQUISTO REGISTRATO MANUALMENTE!</b>\n\n"
+        f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
+        f"• Quantità: <code>{quote} quote</code>\n"
+        f"• Prezzo di Carico: <code>€{pmc:.2f}</code>\n"
+        f"• Controvalore Totale: <code>€{quote * pmc:.2f}</code>\n\n"
+        f"🎯 Take Profit (+6%): <code>€{pmc * 1.06:.2f}</code>\n"
+        f"⚠️ Stop Loss (-4%): <code>€{pmc * 0.96:.2f}</code>\n\n"
+        f"🔍 Il bot ha avviato il monitoraggio continuo.",
+        parse_mode='HTML'
+    )
 
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -255,7 +305,6 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await esegui_scansione_e_monitoraggio(context.bot)
 
 def main():
-    # Avvio thread del server web di supporto per Render
     threading.Thread(target=avvia_server_porta, daemon=True).start()
 
     app = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
@@ -269,6 +318,7 @@ def main():
     )
     
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("compra", cmd_compra))
     app.add_handler(CommandHandler("portafoglio", cmd_portafoglio))
     app.add_handler(CommandHandler("scan", cmd_scan))
     
