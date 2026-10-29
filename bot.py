@@ -27,6 +27,16 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "942878993").strip()
 PORTFOLIO_FILE = "portfolio.json"
 ATTESA_DETTAGLI_ACQUISTO = 1
 
+# POSIZIONI FISSE PERMANENTI (Non si cancellano mai nemmeno se Render si riavvia)
+POSIZIONI_PREDEFINITE = {
+    "ISP.MI": {
+        "nome": "Intesa Sanpaolo",
+        "quote": 3,
+        "pmc": 5.929,
+        "data": "2026-10-29 09:48"
+    }
+}
+
 PANIERE = {
     "ENEL.MI": "Enel",
     "ISP.MI": "Intesa Sanpaolo",
@@ -57,13 +67,15 @@ def avvia_server_porta():
     server.serve_forever()
 
 def carica_portafoglio():
+    portafoglio = dict(POSIZIONI_PREDEFINITE)
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, "r") as f:
-                return json.load(f)
+                dati_salvati = json.load(f)
+                portafoglio.update(dati_salvati)
         except Exception:
-            return {}
-    return {}
+            pass
+    return portafoglio
 
 def salva_portafoglio(data):
     with open(PORTFOLIO_FILE, "w") as f:
@@ -95,8 +107,8 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 msg = (
                     f"🔔 <b>SEGNALE DI USCITA: {info['nome']} ({ticker})</b>\n\n"
                     f"• Condizione: <b>{tipo}</b>\n"
-                    f"• Prezzo di Carico (PMC): <code>€{pmc:.2f}</code>\n"
-                    f"• Prezzo Attuale: <code>€{p_live:.2f}</code>\n"
+                    f"• Prezzo di Carico (PMC): <code>€{pmc:.3f}</code>\n"
+                    f"• Prezzo Attuale: <code>€{p_live:.3f}</code>\n"
                     f"• Performance: <b>{rend_pct:+.2f}%</b>\n"
                     f"• Quantità: <code>{quote} quote</code>\n\n"
                     f"Hai chiuso l'operazione su Directa?"
@@ -169,15 +181,10 @@ async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
         await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Permette di registrare un acquisto manuale: es. /compra ISP.MI 3 5.99"""
     args = context.args
     if len(args) < 3:
         await update.message.reply_text(
-            "⚠️ <b>Formato comando non corretto!</b>\n\n"
-            "Usa il formato:\n"
-            "<code>/compra TICKER QUANTITÀ PREZZO</code>\n\n"
-            "Esempio pratico:\n"
-            "<code>/compra ISP.MI 3 5.99</code>",
+            "⚠️ Formato non corretto! Esempio:\n<code>/compra ISP.MI 3 5.929</code>",
             parse_mode='HTML'
         )
         return
@@ -189,7 +196,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         quote = int(args[1])
         pmc = float(args[2].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Quantità o prezzo non validi. Esempio: <code>/compra ISP.MI 3 5.99</code>", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Quantità o prezzo non validi.", parse_mode='HTML')
         return
 
     nome = PANIERE.get(ticker, ticker)
@@ -203,14 +210,13 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salva_portafoglio(portafoglio)
 
     await update.message.reply_text(
-        f"✅ <b>ACQUISTO REGISTRATO MANUALMENTE!</b>\n\n"
+        f"✅ <b>ACQUISTO REGISTRATO!</b>\n\n"
         f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
         f"• Quantità: <code>{quote} quote</code>\n"
-        f"• Prezzo di Carico: <code>€{pmc:.2f}</code>\n"
-        f"• Controvalore Totale: <code>€{quote * pmc:.2f}</code>\n\n"
-        f"🎯 Take Profit (+6%): <code>€{pmc * 1.06:.2f}</code>\n"
-        f"⚠️ Stop Loss (-4%): <code>€{pmc * 0.96:.2f}</code>\n\n"
-        f"🔍 Il bot ha avviato il monitoraggio continuo.",
+        f"• Prezzo di Carico: <code>€{pmc:.3f}</code>\n"
+        f"• Controvalore: <code>€{quote * pmc:.2f}</code>\n\n"
+        f"🎯 Take Profit (+6%): <code>€{pmc * 1.06:.3f}</code>\n"
+        f"⚠️ Stop Loss (-4%): <code>€{pmc * 0.96:.3f}</code>",
         parse_mode='HTML'
     )
 
@@ -275,16 +281,12 @@ async def registra_dettagli_acquisto(update: Update, context: ContextTypes.DEFAU
             f"✅ <b>REGISTRATO CON SUCCESSO!</b>\n\n"
             f"• Titolo: <b>{nome}</b>\n"
             f"• Quantità: <code>{quote} quote</code>\n"
-            f"• Prezzo Medio di Carico: <code>€{pmc:.2f}</code>\n"
-            f"• Controvalore totale: <code>€{quote * pmc:.2f}</code>\n\n"
-            f"🔍 Monitoraggio attivo: ti avviserò con un messaggio quando sarà il momento di vendere.",
+            f"• Prezzo Medio di Carico: <code>€{pmc:.3f}</code>\n"
+            f"• Controvalore totale: <code>€{quote * pmc:.2f}</code>",
             parse_mode='HTML'
         )
     except Exception:
-        await update.message.reply_text(
-            "⚠️ Formato non riconosciuto. Scrivimi nel formato: <code>3 a 6.40</code>",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("⚠️ Formato non riconosciuto. Esempio: <code>3 a 5.929</code>", parse_mode='HTML')
         return ATTESA_DETTAGLI_ACQUISTO
         
     return ConversationHandler.END
@@ -297,7 +299,14 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     msg = "💼 <b>PORTAFOGLIO ATTIVO IN MONITORAGGIO:</b>\n\n"
     for t, info in portafoglio.items():
-        msg += f"🔹 <b>{info['nome']}</b>: {info['quote']} quote @ €{info['pmc']:.2f} (inserito il {info['data'][:10]})\n"
+        pmc = info['pmc']
+        msg += (
+            f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
+            f"  • Quote: <code>{info['quote']}</code>\n"
+            f"  • PMC: <code>€{pmc:.3f}</code>\n"
+            f"  • Take-Profit (+6%): <code>€{pmc * 1.06:.3f}</code>\n"
+            f"  • Stop-Loss (-4%): <code>€{pmc * 0.96:.3f}</code>\n\n"
+        )
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
