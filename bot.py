@@ -297,16 +297,43 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Nessun titolo attualmente monitorato nel portafoglio.")
         return
         
-    msg = "💼 <b>PORTAFOGLIO ATTIVO IN MONITORAGGIO:</b>\n\n"
+    msg = "💼 <b>STATO PORTAFOGLIO & PROGRESSIONE OBIETTIVI</b>\n\n"
+    
     for t, info in portafoglio.items():
         pmc = info['pmc']
+        quote = info['quote']
+        tp_prezzo = pmc * 1.06
+        sl_prezzo = pmc * 0.96
+        
+        # Recupero prezzo live
+        p_live = pmc
+        try:
+            d = yf.download(t, period="2d", interval="1d", progress=False)
+            if not d.empty:
+                if isinstance(d.columns, pd.MultiIndex):
+                    d.columns = d.columns.get_level_values(0)
+                p_live = float(d['Close'].iloc[-1])
+        except Exception:
+            pass
+
+        rend_attuale = ((p_live - pmc) / pmc) * 100
+        dist_tp = ((tp_prezzo - p_live) / p_live) * 100
+        dist_sl = ((p_live - sl_prezzo) / p_live) * 100
+
+        segno = "🟢" if rend_attuale >= 0 else "🔴"
+
         msg += (
             f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
-            f"  • Quote: <code>{info['quote']}</code>\n"
-            f"  • PMC: <code>€{pmc:.3f}</code>\n"
-            f"  • Take-Profit (+6%): <code>€{pmc * 1.06:.3f}</code>\n"
-            f"  • Stop-Loss (-4%): <code>€{pmc * 0.96:.3f}</code>\n\n"
+            f"  • Quote: <code>{quote}</code> | Investito: <code>€{quote * pmc:.2f}</code>\n"
+            f"  • PMC: <code>€{pmc:.3f}</code> ➔ Attuale: <code>€{p_live:.3f}</code>\n"
+            f"  • Rendimento attuale: {segno} <b>{rend_attuale:+.2f}%</b>\n\n"
+            f"  🎯 <b>Target Take-Profit (+6% a €{tp_prezzo:.3f}):</b>\n"
+            f"     Mancano: <b>{dist_tp:+.2f}%</b> al traguardo\n\n"
+            f"  ⚠️ <b>Soglia Stop-Loss (-4% a €{sl_prezzo:.3f}):</b>\n"
+            f"     Margine di sicurezza: <b>{dist_sl:.2f}%</b> prima dello stop\n"
+            f"───────────────────\n"
         )
+        
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
