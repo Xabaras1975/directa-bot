@@ -114,7 +114,11 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if isinstance(d.columns, pd.MultiIndex):
                 d.columns = d.columns.get_level_values(0)
 
-            p_live = float(d['Close'].iloc[-1])
+            c_series = d['Close']
+            if isinstance(c_series, pd.DataFrame):
+                c_series = c_series.iloc[:, 0]
+
+            p_live = float(c_series.iloc[-1])
             pmc = info['pmc']
             quote = info['quote']
             rend_pct = ((p_live - pmc) / pmc) * 100
@@ -138,19 +142,22 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Scansione del paniere e calcolo classifica
+    # 2. Scansione del paniere e calcolo classifica Top 10
     risultati = []
     for ticker, nome in PANIERE.items():
         if ticker in portafoglio:
             continue
         try:
             df = yf.download(ticker, period="1y", interval="1d", progress=False)
-            if df.empty or len(df) < 60:
+            if df.empty or len(df) < 30:
                 continue
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
             close = df['Close']
+            if isinstance(close, pd.DataFrame):
+                close = close.iloc[:, 0]
+
             p_curr = float(close.iloc[-1])
             sma20 = float(close.rolling(20).mean().iloc[-1])
             sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float(close.rolling(50).mean().iloc[-1])
@@ -160,7 +167,11 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             delta = close.diff()
             g = (delta.where(delta > 0, 0)).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = float(100 - (100 / (1 + (g / l)))).iloc[-1]
+            
+            # Calcolo corretto RSI (parentesi corretta)
+            rs = g / l
+            rsi_series = 100 - (100 / (1 + rs))
+            rsi = float(rsi_series.iloc[-1])
 
             score = 50.0
             if z_score <= -2.0: score += 25
@@ -184,11 +195,12 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 "rsi": rsi,
                 "z_score": z_score
             })
-        except Exception:
+        except Exception as e:
+            logging.error(f"Errore scan {ticker}: {e}")
             continue
 
     if not risultati:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile.")
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile da Yahoo Finance al momento.")
         return
 
     # Ordinamento decrescente per score
@@ -358,7 +370,10 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not d.empty:
                 if isinstance(d.columns, pd.MultiIndex):
                     d.columns = d.columns.get_level_values(0)
-                p_live = float(d['Close'].iloc[-1])
+                c_series = d['Close']
+                if isinstance(c_series, pd.DataFrame):
+                    c_series = c_series.iloc[:, 0]
+                p_live = float(c_series.iloc[-1])
         except Exception:
             pass
 
