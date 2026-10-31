@@ -138,8 +138,8 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Scansione del paniere per nuove opportunità
-    trovati = 0
+    # 2. Scansione del paniere e calcolo classifica
+    risultati = []
     for ticker, nome in PANIERE.items():
         if ticker in portafoglio:
             continue
@@ -176,27 +176,52 @@ async def esegui_scansione_e_monitoraggio(app_bot):
 
             score = int(np.clip(score, 0, 100))
 
-            # Soglia calibrata a 55 per aumentare la sensibilità operativa
-            if score >= 55:
-                trovati += 1
-                tastiera = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Ho Comprato", callback_data=f"buy_{ticker}_{p_curr:.2f}")],
-                    [InlineKeyboardButton("❌ Ignora", callback_data=f"ignora_{ticker}")]
-                ])
-                testo = (
-                    f"📢 <b>OPPORTUNITÀ INGRESSO DIRECTA</b>\n\n"
-                    f"• <b>{nome}</b> (<code>{ticker}</code>)\n"
-                    f"• Ultimo Prezzo: <code>€{p_curr:.3f}</code>\n"
-                    f"• Score Statistico: <b>{score}/100</b>\n"
-                    f"• RSI: <code>{rsi:.1f}</code> | Z-Score: <code>{z_score:+.2f}σ</code>\n\n"
-                    f"Hai eseguito l'acquisto su Directa?"
-                )
-                await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo, parse_mode='HTML', reply_markup=tastiera)
+            risultati.append({
+                "ticker": ticker,
+                "nome": nome,
+                "prezzo": p_curr,
+                "score": score,
+                "rsi": rsi,
+                "z_score": z_score
+            })
         except Exception:
             continue
 
-    if trovati == 0:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun titolo con score ≥ 55 al momento.")
+    if not risultati:
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile.")
+        return
+
+    # Ordinamento decrescente per score
+    risultati.sort(key=lambda x: x["score"], reverse=True)
+    top10 = risultati[:10]
+
+    # Messaggio riassuntivo Top 10
+    classifica_txt = "📊 <b>TOP 10 OPPORTUNITÀ BORSA ITALIANA</b>\n\n"
+    for i, item in enumerate(top10, start=1):
+        icona = "🔥" if item['score'] >= 55 else "🔹"
+        classifica_txt += (
+            f"{i}. {icona} <b>{item['nome']}</b> (<code>{item['ticker']}</code>)\n"
+            f"   Prezzo: <code>€{item['prezzo']:.3f}</code> | Score: <b>{item['score']}/100</b>\n"
+            f"   RSI: <code>{item['rsi']:.1f}</code> | Z-Score: <code>{item['z_score']:+.2f}σ</code>\n\n"
+        )
+    await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=classifica_txt, parse_mode='HTML')
+
+    # Alert operativi con bottoni di acquisto per titoli con score >= 55
+    opportunita = [r for r in top10 if r["score"] >= 55]
+    for opp in opportunita:
+        tastiera = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ Ho Comprato", callback_data=f"buy_{opp['ticker']}_{opp['prezzo']:.3f}")],
+            [InlineKeyboardButton("❌ Ignora", callback_data=f"ignora_{opp['ticker']}")]
+        ])
+        testo_alert = (
+            f"📢 <b>SEGNALE INGRESSO DIRECTA ATTIVO</b>\n\n"
+            f"• <b>{opp['nome']}</b> (<code>{opp['ticker']}</code>)\n"
+            f"• Prezzo: <code>€{opp['prezzo']:.3f}</code>\n"
+            f"• Score: <b>{opp['score']}/100</b>\n"
+            f"• RSI: <code>{opp['rsi']:.1f}</code> | Z-Score: <code>{opp['z_score']:+.2f}σ</code>\n\n"
+            f"Vuoi registrare l'acquisto?"
+        )
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo_alert, parse_mode='HTML', reply_markup=tastiera)
 
 async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
@@ -358,7 +383,7 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Avvio scansione di Borsa Italiana...")
+    await update.message.reply_text("🔍 Avvio scansione del paniere e calcolo Top 10...")
     await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -397,7 +422,7 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Prezzo Attuale: <code>€{prezzo_live:.5f}</code>\n"
         f"• Variazione dal Crollo: {icona_diff} <b>{diff_base:+.2f}%</b>\n\n"
         f"🎯 <b>Target Profitto (+2σ a €{upper_band:.5f}):</b>\n"
-        f"   Distanza: <b>{manca_tp:+.2f}%</b> dal picco\n\n"
+        f"   Distanza: <b>{manca_tp:+.2f}%</b> dal picco statistico\n\n"
         f"⚠️ <b>Supporto Accumulo (-2σ a €{lower_band:.5f}):</b>\n"
         f"   Margine: <b>{margine_sl:.2f}%</b> dalla soglia\n"
     )
