@@ -102,29 +102,60 @@ def salva_portafoglio(data):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+def calcola_atr(df, period=14):
+    """Calcola l'Average True Range su 14 periodi"""
+    high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
+    low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
+    close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+    
+    prev_close = close.shift(1)
+    tr1 = high - low
+    tr2 = (high - prev_close).abs()
+    tr3 = (low - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    return float(atr.iloc[-1])
+
+def verifica_regime_ftsemib():
+    """Verifica se il trend del FTSE MIB è favorevole (prezzo sopra SMA 50)"""
+    try:
+        df_index = yf.download("FTSEMIB.MI", period="6mo", interval="1d", progress=False)
+        if df_index.empty:
+            return True, 0.0
+        c = df_index['Close'].iloc[:, 0] if isinstance(df_index['Close'], pd.DataFrame) else df_index['Close']
+        p_idx = float(c.iloc[-1])
+        sma50_idx = float(c.rolling(50).mean().iloc[-1])
+        bullish = p_idx >= sma50_idx
+        return bullish, p_idx
+    except Exception:
+        return True, 0.0
+
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Monitoraggio posizioni aperte (Take Profit / Stop Loss)
+    # 1. Monitoraggio posizioni aperte (con Target Dinamici ATR)
     for ticker, info in list(portafoglio.items()):
         try:
-            d = yf.download(ticker, period="5d", interval="1d", progress=False)
+            d = yf.download(ticker, period="3mo", interval="1d", progress=False)
             if d.empty:
                 continue
             if isinstance(d.columns, pd.MultiIndex):
                 d.columns = d.columns.get_level_values(0)
 
-            c_series = d['Close']
-            if isinstance(c_series, pd.DataFrame):
-                c_series = c_series.iloc[:, 0]
-
+            c_series = d['Close'].iloc[:, 0] if isinstance(d['Close'], pd.DataFrame) else d['Close']
             p_live = float(c_series.iloc[-1])
             pmc = info['pmc']
             quote = info['quote']
+
+            # Target Dinamico con ATR (o fallback percentuale se ATR non disponibile)
+            atr_val = calcola_atr(d, 14) if len(d) >= 15 else (pmc * 0.03)
+            tp_dinamico = pmc + (2.0 * atr_val)
+            sl_dinamico = pmc - (1.5 * atr_val)
+
             rend_pct = ((p_live - pmc) / pmc) * 100
 
-            if rend_pct >= 6.0 or rend_pct <= -4.0:
-                tipo = "🎯 TAKE PROFIT (+6%)" if rend_pct >= 6.0 else "⚠️ STOP LOSS (-4%)"
+            if p_live >= tp_dinamico or p_live <= sl_dinamico:
+                tipo = f"🎯 TAKE PROFIT (ATR +2.0x a €{tp_dinamico:.3f})" if p_live >= tp_dinamico else f"⚠️ STOP LOSS (ATR -1.5x a €{sl_dinamico:.3f})"
                 tastiera = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Venduto su Directa", callback_data=f"venduto_{ticker}")],
                     [InlineKeyboardButton("⏳ Tieni Posizione", callback_data=f"tieni_{ticker}")]
@@ -142,7 +173,11 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Scansione del paniere e calcolo classifica Top 10
+    # 2. Controllo Regime di Mercato (FTSE MIB)
+    indice_rialzista, idx_val = verifica_regime_ftsemib()
+    regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
+
+    # 3. Scansione Paniere con Volumi, ATR e Z-Score
     risultati = []
     for ticker, nome in PANIERE.items():
         if ticker in portafoglio:
@@ -154,9 +189,8 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
 
-            close = df['Close']
-            if isinstance(close, pd.DataFrame):
-                close = close.iloc[:, 0]
+            close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+            volume = df['Volume'].iloc[:, 0] if isinstance(df['Volume'], pd.DataFrame) else df['Volume']
 
             p_curr = float(close.iloc[-1])
             sma20 = float(close.rolling(20).mean().iloc[-1])
@@ -164,26 +198,52 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             std20 = float(close.rolling(20).std().iloc[-1])
             z_score = (p_curr - sma20) / std20 if std20 > 0 else 0.0
 
+            # Calcolo RSI
             delta = close.diff()
             g = (delta.where(delta > 0, 0)).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            
-            # Calcolo corretto RSI (parentesi corretta)
             rs = g / l
             rsi_series = 100 - (100 / (1 + rs))
             rsi = float(rsi_series.iloc[-1])
 
+            # Calcolo Volumi Anomali (Volume Ratio vs SMA 20)
+            vol_last = float(volume.iloc[-1])
+            sma_vol = float(volume.rolling(20).mean().iloc[-1])
+            vol_ratio = (vol_last / sma_vol) if sma_vol > 0 else 1.0
+
+            # Calcolo ATR e target dinamici
+            atr = calcola_atr(df, 14)
+            tp_stimato = p_curr + (2.0 * atr)
+            sl_stimato = p_curr - (1.5 * atr)
+
+            # Score Base
             score = 50.0
-            if z_score <= -2.0: score += 25
-            elif z_score <= -1.0: score += 12
+
+            # Impatto Regime Mercato
+            if indice_rialzista:
+                score += 5
+            else:
+                score -= 10
+
+            # Valutazione Z-Score (Mean Reversion)
+            if z_score <= -2.0: score += 20
+            elif z_score <= -1.0: score += 10
             elif z_score >= 2.0: score -= 20
 
-            if rsi < 32: score += 20
-            elif rsi < 42: score += 10
+            # Valutazione RSI
+            if rsi < 32: score += 18
+            elif rsi < 42: score += 8
             elif rsi > 70: score -= 20
 
-            if p_curr > sma200: score += 10
-            else: score -= 15
+            # Trend primario del titolo
+            if p_curr > sma200: score += 8
+            else: score -= 12
+
+            # Filtro Volumi: se scende con volumi enormi è pericoloso; se rimbalza con volumi è ottimo
+            if z_score < -1.0 and vol_ratio > 1.6:
+                score -= 15  # Crollo con volumi: trappola di valore
+            elif z_score >= -1.0 and vol_ratio > 1.3:
+                score += 10  # Volumi in espansione su tenuta supporto
 
             score = int(np.clip(score, 0, 100))
 
@@ -193,32 +253,40 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 "prezzo": p_curr,
                 "score": score,
                 "rsi": rsi,
-                "z_score": z_score
+                "z_score": z_score,
+                "vol_ratio": vol_ratio,
+                "atr": atr,
+                "tp": tp_stimato,
+                "sl": sl_stimato
             })
         except Exception as e:
             logging.error(f"Errore scan {ticker}: {e}")
             continue
 
     if not risultati:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile da Yahoo Finance al momento.")
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile al momento.")
         return
 
     # Ordinamento decrescente per score
     risultati.sort(key=lambda x: x["score"], reverse=True)
     top10 = risultati[:10]
 
-    # Messaggio riassuntivo Top 10
-    classifica_txt = "📊 <b>TOP 10 OPPORTUNITÀ BORSA ITALIANA</b>\n\n"
+    # Messaggio riassuntivo Top 10 con indicatori avanzati
+    classifica_txt = (
+        f"📊 <b>TOP 10 OPPORTUNITÀ BORSA ITALIANA</b>\n"
+        f"🌐 <i>Regime FTSE MIB: {regime_icon}</i>\n\n"
+    )
     for i, item in enumerate(top10, start=1):
         icona = "🔥" if item['score'] >= 55 else "🔹"
         classifica_txt += (
             f"{i}. {icona} <b>{item['nome']}</b> (<code>{item['ticker']}</code>)\n"
             f"   Prezzo: <code>€{item['prezzo']:.3f}</code> | Score: <b>{item['score']}/100</b>\n"
-            f"   RSI: <code>{item['rsi']:.1f}</code> | Z-Score: <code>{item['z_score']:+.2f}σ</code>\n\n"
+            f"   RSI: <code>{item['rsi']:.1f}</code> | Z-Score: <code>{item['z_score']:+.2f}σ</code> | Vol: <code>{item['vol_ratio']:.1f}x</code>\n"
+            f"   🎯 TP: <code>€{item['tp']:.3f}</code> | ⚠️ SL: <code>€{item['sl']:.3f}</code>\n\n"
         )
     await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=classifica_txt, parse_mode='HTML')
 
-    # Alert operativi con bottoni di acquisto per titoli con score >= 55
+    # Alert con bottoni se score >= 55
     opportunita = [r for r in top10 if r["score"] >= 55]
     for opp in opportunita:
         tastiera = InlineKeyboardMarkup([
@@ -226,12 +294,13 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             [InlineKeyboardButton("❌ Ignora", callback_data=f"ignora_{opp['ticker']}")]
         ])
         testo_alert = (
-            f"📢 <b>SEGNALE INGRESSO DIRECTA ATTIVO</b>\n\n"
+            f"📢 <b>SEGNALE INGRESSO QUANTITATIVO</b>\n\n"
             f"• <b>{opp['nome']}</b> (<code>{opp['ticker']}</code>)\n"
-            f"• Prezzo: <code>€{opp['prezzo']:.3f}</code>\n"
-            f"• Score: <b>{opp['score']}/100</b>\n"
-            f"• RSI: <code>{opp['rsi']:.1f}</code> | Z-Score: <code>{opp['z_score']:+.2f}σ</code>\n\n"
-            f"Vuoi registrare l'acquisto?"
+            f"• Prezzo: <code>€{opp['prezzo']:.3f}</code> | Score: <b>{opp['score']}/100</b>\n"
+            f"• Volumi: <code>{opp['vol_ratio']:.1f}x media</code> | ATR: <code>€{opp['atr']:.3f}</code>\n"
+            f"• 🎯 Target Dinamico (+2 ATR): <code>€{opp['tp']:.3f}</code>\n"
+            f"• ⚠️ Stop Dinamico (-1.5 ATR): <code>€{opp['sl']:.3f}</code>\n\n"
+            f"Vuoi registrare l'operazione su Directa?"
         )
         await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo_alert, parse_mode='HTML', reply_markup=tastiera)
 
@@ -273,9 +342,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
         f"• Quantità: <code>{quote} quote</code>\n"
         f"• Prezzo di Carico: <code>€{pmc:.3f}</code>\n"
-        f"• Controvalore: <code>€{quote * pmc:.2f}</code>\n"
-        f"• 🎯 Take Profit (+6%): <code>€{pmc * 1.06:.3f}</code>\n"
-        f"• ⚠️ Stop Loss (-4%): <code>€{pmc * 0.96:.3f}</code>",
+        f"• Controvalore: <code>€{quote * pmc:.2f}</code>",
         parse_mode='HTML'
     )
 
@@ -356,26 +423,29 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💼 Nessun titolo attualmente monitorato nel portafoglio.")
         return
 
-    msg = "💼 <b>STATO PORTAFOGLIO & PROGRESSIONE OBIETTIVI</b>\n\n"
+    msg = "💼 <b>STATO PORTAFOGLIO & PROGRESSIONE OBIETTIVI DINAMICI</b>\n\n"
 
     for t, info in portafoglio.items():
         pmc = info['pmc']
         quote = info['quote']
-        tp_prezzo = pmc * 1.06
-        sl_prezzo = pmc * 0.96
 
+        # Recupero dati live e calcolo ATR
         p_live = pmc
+        atr_val = pmc * 0.03
         try:
-            d = yf.download(t, period="2d", interval="1d", progress=False)
+            d = yf.download(t, period="3mo", interval="1d", progress=False)
             if not d.empty:
                 if isinstance(d.columns, pd.MultiIndex):
                     d.columns = d.columns.get_level_values(0)
-                c_series = d['Close']
-                if isinstance(c_series, pd.DataFrame):
-                    c_series = c_series.iloc[:, 0]
+                c_series = d['Close'].iloc[:, 0] if isinstance(d['Close'], pd.DataFrame) else d['Close']
                 p_live = float(c_series.iloc[-1])
+                if len(d) >= 15:
+                    atr_val = calcola_atr(d, 14)
         except Exception:
             pass
+
+        tp_prezzo = pmc + (2.0 * atr_val)
+        sl_prezzo = pmc - (1.5 * atr_val)
 
         rend_attuale = ((p_live - pmc) / pmc) * 100
         dist_tp = ((tp_prezzo - p_live) / p_live) * 100
@@ -388,9 +458,9 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• Quote: <code>{quote}</code> | Investito: <code>€{quote * pmc:.2f}</code>\n"
             f"• PMC: <code>€{pmc:.3f}</code> ➔ Attuale: <code>€{p_live:.3f}</code>\n"
             f"• Rendimento attuale: {segno} <b>{rend_attuale:+.2f}%</b>\n"
-            f"🎯 <b>Target Take-Profit (+6% a €{tp_prezzo:.3f}):</b>\n"
+            f"🎯 <b>Target Dinamico (+2 ATR a €{tp_prezzo:.3f}):</b>\n"
             f"   Mancano: <b>{dist_tp:+.2f}%</b> al traguardo\n"
-            f"⚠️ <b>Soglia Stop-Loss (-4% a €{sl_prezzo:.3f}):</b>\n"
+            f"⚠️ <b>Soglia Stop Dinamico (-1.5 ATR a €{sl_prezzo:.3f}):</b>\n"
             f"   Margine di sicurezza: <b>{dist_sl:.2f}%</b> prima dello stop\n"
             f"────────────────────\n"
         )
@@ -398,7 +468,7 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Avvio scansione del paniere e calcolo Top 10...")
+    await update.message.reply_text("🔍 Avvio scansione quantitativa con Volumi, Regime FTSE MIB e ATR...")
     await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
