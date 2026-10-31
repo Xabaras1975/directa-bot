@@ -20,14 +20,17 @@ from telegram.ext import (
     ConversationHandler
 )
 
+# Configurazione logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
+# Configurazione credenziali protetta da variabili d'ambiente
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+
 PORTFOLIO_FILE = "portfolio.json"
 ATTESA_DETTAGLI_ACQUISTO = 1
 
-# POSIZIONI FISSE PERMANENTI (Non si cancellano mai nemmeno se Render si riavvia)
+# POSIZIONI FISSE PERMANENTI (Non si cancellano nemmeno con riavvio del container)
 POSIZIONI_PREDEFINITE = {
     "ISP.MI": {
         "nome": "Intesa Sanpaolo",
@@ -37,7 +40,22 @@ POSIZIONI_PREDEFINITE = {
     }
 }
 
+# PANIERE AMPLIATO: Grandi titoli, Mid/Small Cap a basso prezzo nominale ed ETF
 PANIERE = {
+    # Titoli a basso prezzo nominale (< 3 € - 5 €)
+    "A2A.MI": "A2A",
+    "HER.MI": "Hera",
+    "IRE.MI": "Iren",
+    "SAL.MI": "Webuild",
+    "OVS.MI": "OVS",
+    "MREC.MI": "Maire Tecnimont",
+    "SFER.MI": "Salvatore Ferragamo",
+    "IG.MI": "Italgas",
+    "SRG.MI": "Snam",
+    "TRN.MI": "Terna",
+    "BPE.MI": "BPER Banca",
+
+    # Blue Chip e Finanziari FTSE MIB
     "ENEL.MI": "Enel",
     "ISP.MI": "Intesa Sanpaolo",
     "UCG.MI": "UniCredit",
@@ -45,6 +63,9 @@ PANIERE = {
     "STLAM.MI": "Stellantis",
     "RACE.MI": "Ferrari",
     "G.MI": "Generali",
+    "BMED.MI": "Banca Mediolanum",
+
+    # ETF di riferimento
     "SWDA.MI": "iShares MSCI World (SWDA)",
     "CSSPX.MI": "iShares S&P 500 (CSSPX)",
     "XEON.MI": "Xtrackers Overnight €STR (XEON)"
@@ -117,7 +138,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Ricerca nuovi ingressi
+    # 2. Scansione del paniere per nuove opportunità
     trovati = 0
     for ticker, nome in PANIERE.items():
         if ticker in portafoglio:
@@ -155,7 +176,8 @@ async def esegui_scansione_e_monitoraggio(app_bot):
 
             score = int(np.clip(score, 0, 100))
 
-            if score >= 60:
+            # Soglia calibrata a 55 per aumentare la sensibilità operativa
+            if score >= 55:
                 trovati += 1
                 tastiera = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Ho Comprato", callback_data=f"buy_{ticker}_{p_curr:.2f}")],
@@ -164,7 +186,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 testo = (
                     f"📢 <b>OPPORTUNITÀ INGRESSO DIRECTA</b>\n\n"
                     f"• <b>{nome}</b> (<code>{ticker}</code>)\n"
-                    f"• Ultimo Prezzo: <code>€{p_curr:.2f}</code>\n"
+                    f"• Ultimo Prezzo: <code>€{p_curr:.3f}</code>\n"
                     f"• Score Statistico: <b>{score}/100</b>\n"
                     f"• RSI: <code>{rsi:.1f}</code> | Z-Score: <code>{z_score:+.2f}σ</code>\n\n"
                     f"Hai eseguito l'acquisto su Directa?"
@@ -174,7 +196,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             continue
 
     if trovati == 0:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun titolo con score ≥ 60 al momento.")
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun titolo con score ≥ 55 al momento.")
 
 async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
@@ -305,7 +327,6 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         tp_prezzo = pmc * 1.06
         sl_prezzo = pmc * 0.96
 
-        # Recupero prezzo live
         p_live = pmc
         try:
             d = yf.download(t, period="2d", interval="1d", progress=False)
@@ -363,7 +384,7 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upper_band = sma + (2.0 * std)
     lower_band = sma - (2.0 * std)
 
-    # Calcolo percentuali
+    # Scostamenti percentuali
     diff_base = ((prezzo_live - prezzo_base) / prezzo_base) * 100
     manca_tp = ((upper_band - prezzo_live) / prezzo_live) * 100
     margine_sl = ((prezzo_live - lower_band) / prezzo_live) * 100
@@ -374,9 +395,9 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Saldo: <code>{holdings} DOGE</code> | Valore: <b>€{valore_saldo:.2f}</b>\n"
         f"• Base Pre-Crollo: <code>€{prezzo_base:.5f}</code>\n"
         f"• Prezzo Attuale: <code>€{prezzo_live:.5f}</code>\n"
-        f"• Recupero dal Pre-Crollo: {icona_diff} <b>{diff_base:+.2f}%</b>\n\n"
+        f"• Variazione dal Crollo: {icona_diff} <b>{diff_base:+.2f}%</b>\n\n"
         f"🎯 <b>Target Profitto (+2σ a €{upper_band:.5f}):</b>\n"
-        f"   Distanza: <b>{manca_tp:+.2f}%</b> dal picco statistico\n\n"
+        f"   Distanza: <b>{manca_tp:+.2f}%</b> dal picco\n\n"
         f"⚠️ <b>Supporto Accumulo (-2σ a €{lower_band:.5f}):</b>\n"
         f"   Margine: <b>{margine_sl:.2f}%</b> dalla soglia\n"
     )
