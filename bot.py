@@ -186,7 +186,6 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     set_tb = math.comb(10, 5) * (p_game_A**5) * (q_game**5) * 2 * p_game_A * q_game * tb
     prob_set_A = set_secco + set_75 + set_tb
 
-    # Match best of 3 sets
     prob_match_A = (prob_set_A**2) + (2 * prob_set_A * (1 - prob_set_A) * prob_set_A)
     prob_match_B = 1.0 - prob_match_A
 
