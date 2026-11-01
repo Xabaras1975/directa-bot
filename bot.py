@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import asyncio
+import math
 from datetime import datetime, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -9,6 +10,7 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import requests
+from scipy.stats import norm
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
@@ -30,7 +32,7 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 PORTFOLIO_FILE = "portfolio.json"
 ATTESA_DETTAGLI_ACQUISTO = 1
 
-# POSIZIONI FISSE PERMANENTI (Non si cancellano nemmeno con riavvio del container)
+# POSIZIONI FISSE PERMANENTI
 POSIZIONI_PREDEFINITE = {
     "ISP.MI": {
         "nome": "Intesa Sanpaolo",
@@ -76,7 +78,7 @@ class SimpleWebServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot Directa Online")
+        self.wfile.write(b"Bot Directa & Quant Sports Online")
 
     def log_message(self, format, *args):
         return
@@ -103,7 +105,6 @@ def salva_portafoglio(data):
         json.dump(data, f, indent=4)
 
 def calcola_atr(df, period=14):
-    """Calcola l'Average True Range su 14 periodi"""
     high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
     low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
     close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
@@ -117,7 +118,6 @@ def calcola_atr(df, period=14):
     return float(atr.iloc[-1])
 
 def verifica_regime_ftsemib():
-    """Verifica se il trend del FTSE MIB è favorevole (prezzo sopra SMA 50)"""
     try:
         df_index = yf.download("FTSEMIB.MI", period="6mo", interval="1d", progress=False)
         if df_index.empty:
@@ -130,10 +130,149 @@ def verifica_regime_ftsemib():
     except Exception:
         return True, 0.0
 
+# ==========================================
+# MOTORI MATEMATICI TENNIS & BASKET
+# ==========================================
+
+def prob_game_servizio(p):
+    if p >= 1.0: return 1.0
+    if p <= 0.0: return 0.0
+    num = (p**4) * (15 - 34*p + 28*(p**2) - 8*(p**3))
+    den = 1 - 2*p*(1 - p)
+    return float(num / den)
+
+def prob_tiebreak(pA, pB):
+    p_medio_A = (pA + (1 - pB)) / 2.0
+    q = 1.0 - p_medio_A
+    prob_vittoria_secca = 0.0
+    for punti_b in range(6):
+        modi = math.comb(6 + punti_b, punti_b)
+        prob_vittoria_secca += modi * (p_medio_A**6) * (q**punti_b) * p_medio_A
+    prob_6_pari = math.comb(12, 6) * (p_medio_A**6) * (q**6)
+    prob_vantaggi = (p_medio_A**2) / (p_medio_A**2 + q**2)
+    return prob_vittoria_secca + (prob_6_pari * prob_vantaggi)
+
+async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Calcola probabilità Markoviane, Fair Odds ed EV% per il Tennis"""
+    args = context.args
+    if len(args) < 4:
+        msg_help = (
+            "🎾 <b>UTILIZZO COMANDO /tennis</b>\n\n"
+            "Formato:\n"
+            "<code>/tennis &lt;p_serv_A&gt; &lt;p_serv_B&gt; &lt;quota_A&gt; &lt;quota_B&gt;</code>\n\n"
+            "Esempio (A vince il 68% al servizio, B il 63%):\n"
+            "<code>/tennis 0.68 0.63 1.65 2.30</code>"
+        )
+        await update.message.reply_text(msg_help, parse_mode='HTML')
+        return
+
+    try:
+        pA = float(args[0].replace(",", "."))
+        pB = float(args[1].replace(",", "."))
+        quota_A = float(args[2].replace(",", "."))
+        quota_B = float(args[3].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("⚠️ Parametri numerici non validi.", parse_mode='HTML')
+        return
+
+    gA = prob_game_servizio(pA)
+    gB = prob_game_servizio(pB)
+    tb = prob_tiebreak(pA, pB)
+
+    p_game_A = (gA + (1.0 - gB)) / 2.0
+    q_game = 1.0 - p_game_A
+    set_secco = sum(math.comb(5 + b, b) * (p_game_A**6) * (q_game**b) for b in range(5))
+    set_75 = math.comb(10, 5) * (p_game_A**5) * (q_game**5) * (p_game_A**2)
+    set_tb = math.comb(10, 5) * (p_game_A**5) * (q_game**5) * 2 * p_game_A * q_game * tb
+    prob_set_A = set_secco + set_75 + set_tb
+
+    # Match best of 3 sets
+    prob_match_A = (prob_set_A**2) + (2 * prob_set_A * (1 - prob_set_A) * prob_set_A)
+    prob_match_B = 1.0 - prob_match_A
+
+    fair_A = 1.0 / prob_match_A
+    fair_B = 1.0 / prob_match_B
+
+    ev_A = ((quota_A * prob_match_A) - 1.0) * 100
+    ev_B = ((quota_B * prob_match_B) - 1.0) * 100
+
+    icon_A = "🔥 VALORE" if ev_A > 2.0 else "⚪"
+    icon_B = "🔥 VALORE" if ev_B > 2.0 else "⚪"
+
+    msg = (
+        "🎾 <b>MODELLO MARKOVIANO TENNIS (PUNTO-A-PUNTO)</b>\n\n"
+        f"• Game Servizio A: <code>{gA*100:.1f}%</code> | B: <code>{gB*100:.1f}%</code>\n"
+        f"• Probabilità Set A: <code>{prob_set_A*100:.1f}%</code>\n\n"
+        f"👤 <b>Giocatore A:</b>\n"
+        f"   Probabilità Reale: <b>{prob_match_A*100:.1f}%</b> | Quota Equa: <code>{fair_A:.2f}</code>\n"
+        f"   Quota Book: <code>{quota_A:.2f}</code> ➔ EV: <b>{ev_A:+.2f}%</b> {icon_A}\n\n"
+        f"👤 <b>Giocatore B:</b>\n"
+        f"   Probabilità Reale: <b>{prob_match_B*100:.1f}%</b> | Quota Equa: <code>{fair_B:.2f}</code>\n"
+        f"   Quota Book: <code>{quota_B:.2f}</code> ➔ EV: <b>{ev_B:+.2f}%</b> {icon_B}"
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Calcola Possessi, Spread e Copertura Handicap per il Basket"""
+    args = context.args
+    if len(args) < 8:
+        msg_help = (
+            "🏀 <b>UTILIZZO COMANDO /basket</b>\n\n"
+            "Formato:\n"
+            "<code>/basket &lt;paceA&gt; &lt;offA&gt; &lt;defA&gt; &lt;paceB&gt; &lt;offB&gt; &lt;defB&gt; &lt;linea_spread&gt; &lt;quota_spread&gt;</code>\n\n"
+            "Esempio (Casa pace 102, off 118, def 112 vs Ospite pace 98, off 113, def 115 su linea -4.5 a 1.91):\n"
+            "<code>/basket 102 118 112 98 113 115 -4.5 1.91</code>"
+        )
+        await update.message.reply_text(msg_help, parse_mode='HTML')
+        return
+
+    try:
+        p_A, o_A, d_A = float(args[0]), float(args[1]), float(args[2])
+        p_B, o_B, d_B = float(args[3]), float(args[4]), float(args[5])
+        linea_spread = float(args[6].replace(",", "."))
+        quota_spread = float(args[7].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("⚠️ Parametri basket non validi.", parse_mode='HTML')
+        return
+
+    pace_match = (p_A * p_B) / 100.0
+    home_adv = 2.5
+    sigma = 11.2
+
+    punti_A = (pace_match * (o_A * d_B) / (114.0 * 100.0)) + (home_adv / 2.0)
+    punti_B = (pace_match * (o_B * d_A) / (114.0 * 100.0)) - (home_adv / 2.0)
+
+    totale = punti_A + punti_B
+    scarto_atteso = punti_A - punti_B
+
+    soglia = -linea_spread
+    z = (soglia - scarto_atteso) / sigma
+    prob_copertura = 1.0 - norm.cdf(z)
+    fair_odds = 1.0 / prob_copertura if prob_copertura > 0 else 999.0
+    ev = ((quota_spread * prob_copertura) - 1.0) * 100
+    icon_ev = "🔥 VALORE" if ev > 2.0 else "⚪"
+
+    msg = (
+        "🏀 <b>MODELLO PACE & RATING BASKET</b>\n\n"
+        f"• Possessi Stimati: <code>{pace_match:.1f}</code>\n"
+        f"• Punteggio Atteso: <b>{punti_A:.1f} - {punti_B:.1f}</b>\n"
+        f"• Totale Punti Previsti: <code>{totale:.1f}</code>\n"
+        f"• Spread Modellato: <b>{-scarto_atteso:+.1f}</b> punti\n\n"
+        f"🎯 <b>Valutazione Linea Handicap ({linea_spread:+.1f}):</b>\n"
+        f"• Probabilità Copertura: <b>{prob_copertura*100:.1f}%</b>\n"
+        f"• Quota Equa: <code>{fair_odds:.2f}</code> | Book: <code>{quota_spread:.2f}</code>\n"
+        f"• Expected Value (EV): <b>{ev:+.2f}%</b> {icon_ev}"
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+# ==========================================
+# MONITORAGGIO E SCANSIONE DIRECTA (AZIONI)
+# ==========================================
+
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Monitoraggio posizioni aperte (con Target Dinamici ATR)
+    # 1. Monitoraggio posizioni aperte (Target Dinamici ATR)
     for ticker, info in list(portafoglio.items()):
         try:
             d = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -147,7 +286,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             pmc = info['pmc']
             quote = info['quote']
 
-            # Target Dinamico con ATR (o fallback percentuale se ATR non disponibile)
             atr_val = calcola_atr(d, 14) if len(d) >= 15 else (pmc * 0.03)
             tp_dinamico = pmc + (2.0 * atr_val)
             sl_dinamico = pmc - (1.5 * atr_val)
@@ -173,7 +311,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Controllo Regime di Mercato (FTSE MIB)
+    # 2. Controllo Regime FTSE MIB
     indice_rialzista, idx_val = verifica_regime_ftsemib()
     regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
@@ -198,7 +336,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             std20 = float(close.rolling(20).std().iloc[-1])
             z_score = (p_curr - sma20) / std20 if std20 > 0 else 0.0
 
-            # Calcolo RSI
             delta = close.diff()
             g = (delta.where(delta > 0, 0)).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
@@ -206,44 +343,33 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             rsi_series = 100 - (100 / (1 + rs))
             rsi = float(rsi_series.iloc[-1])
 
-            # Calcolo Volumi Anomali (Volume Ratio vs SMA 20)
             vol_last = float(volume.iloc[-1])
             sma_vol = float(volume.rolling(20).mean().iloc[-1])
             vol_ratio = (vol_last / sma_vol) if sma_vol > 0 else 1.0
 
-            # Calcolo ATR e target dinamici
             atr = calcola_atr(df, 14)
             tp_stimato = p_curr + (2.0 * atr)
             sl_stimato = p_curr - (1.5 * atr)
 
-            # Score Base
             score = 50.0
+            if indice_rialzista: score += 5
+            else: score -= 10
 
-            # Impatto Regime Mercato
-            if indice_rialzista:
-                score += 5
-            else:
-                score -= 10
-
-            # Valutazione Z-Score (Mean Reversion)
             if z_score <= -2.0: score += 20
             elif z_score <= -1.0: score += 10
             elif z_score >= 2.0: score -= 20
 
-            # Valutazione RSI
             if rsi < 32: score += 18
             elif rsi < 42: score += 8
             elif rsi > 70: score -= 20
 
-            # Trend primario del titolo
             if p_curr > sma200: score += 8
             else: score -= 12
 
-            # Filtro Volumi: se scende con volumi enormi è pericoloso; se rimbalza con volumi è ottimo
             if z_score < -1.0 and vol_ratio > 1.6:
-                score -= 15  # Crollo con volumi: trappola di valore
+                score -= 15
             elif z_score >= -1.0 and vol_ratio > 1.3:
-                score += 10  # Volumi in espansione su tenuta supporto
+                score += 10
 
             score = int(np.clip(score, 0, 100))
 
@@ -267,11 +393,9 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile al momento.")
         return
 
-    # Ordinamento decrescente per score
     risultati.sort(key=lambda x: x["score"], reverse=True)
     top10 = risultati[:10]
 
-    # Messaggio riassuntivo Top 10 con indicatori avanzati
     classifica_txt = (
         f"📊 <b>TOP 10 OPPORTUNITÀ BORSA ITALIANA</b>\n"
         f"🌐 <i>Regime FTSE MIB: {regime_icon}</i>\n\n"
@@ -286,7 +410,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         )
     await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=classifica_txt, parse_mode='HTML')
 
-    # Alert con bottoni se score >= 55
     opportunita = [r for r in top10 if r["score"] >= 55]
     for opp in opportunita:
         tastiera = InlineKeyboardMarkup([
@@ -429,7 +552,6 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pmc = info['pmc']
         quote = info['quote']
 
-        # Recupero dati live e calcolo ATR
         p_live = pmc
         atr_val = pmc * 0.03
         try:
@@ -472,7 +594,6 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando interattivo per monitorare DOGE con calcolo Bollinger e recupero dal pre-crollo"""
     url = "https://api.crypto.com/v2/public/get-candlestick?instrument_name=DOGE_EUR&timeframe=1h"
     try:
         res = requests.get(url, timeout=10).json()
@@ -483,18 +604,16 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     prezzo_live = closes[-1]
-    prezzo_base = 0.07280  # Livello prima del crollo (29 Ottobre)
+    prezzo_base = 0.07280
     holdings = 186.49
     valore_saldo = holdings * prezzo_live
 
-    # Statistiche Bollinger (20 periodi orari, 2 std)
     recenti = closes[-20:]
     sma = float(np.mean(recenti))
     std = float(np.std(recenti))
     upper_band = sma + (2.0 * std)
     lower_band = sma - (2.0 * std)
 
-    # Scostamenti percentuali
     diff_base = ((prezzo_live - prezzo_base) / prezzo_base) * 100
     manca_tp = ((upper_band - prezzo_live) / prezzo_live) * 100
     margine_sl = ((prezzo_live - lower_band) / prezzo_live) * 100
@@ -531,11 +650,13 @@ def main():
     app.add_handler(CommandHandler("portafoglio", cmd_portafoglio))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("doge", cmd_doge))
+    app.add_handler(CommandHandler("tennis", cmd_tennis))
+    app.add_handler(CommandHandler("basket", cmd_basket))
 
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram avviato e in ascolto...")
+    print("🤖 Bot Telegram avviato con moduli Finanza, Crypto, Tennis e Basket...")
     app.run_polling()
 
 if __name__ == "__main__":
