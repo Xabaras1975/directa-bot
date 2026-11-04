@@ -3,6 +3,8 @@ import json
 import logging
 import asyncio
 import math
+import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
@@ -25,26 +27,21 @@ from telegram.ext import (
 # Configurazione logging
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
-# Configurazione credenziali protetta da variabili d'ambiente
+# Credenziali ambiente
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
 PORTFOLIO_FILE = "portfolio.json"
+STORICO_FILE = "storico_operazioni.json"
 ATTESA_DETTAGLI_ACQUISTO = 1
+ATTESA_PREZZO_VENDITA = 2
 
-# POSIZIONI FISSE PERMANENTI
-POSIZIONI_PREDEFINITE = {
-    "ISP.MI": {
-        "nome": "Intesa Sanpaolo",
-        "quote": 3,
-        "pmc": 5.929,
-        "data": "2026-10-29 09:48"
-    }
-}
+# Posizioni predefinite azzerate per consentire piena dinamicità
+POSIZIONI_PREDEFINITE = {}
 
-# PANIERE AMPLIATO: Grandi titoli, Mid/Small Cap a basso prezzo nominale ed ETF
+# Paniere Monitorato
 PANIERE = {
-    # Titoli a basso prezzo nominale (< 3 € - 5 €)
+    # Small / Mid Cap & Prezzo Nominale accessibile
     "A2A.MI": "A2A",
     "HER.MI": "Hera",
     "IRE.MI": "Iren",
@@ -57,7 +54,7 @@ PANIERE = {
     "TRN.MI": "Terna",
     "BPE.MI": "BPER Banca",
 
-    # Blue Chip e Finanziari FTSE MIB
+    # Blue Chip FTSE MIB
     "ENEL.MI": "Enel",
     "ISP.MI": "Intesa Sanpaolo",
     "UCG.MI": "UniCredit",
@@ -67,18 +64,19 @@ PANIERE = {
     "G.MI": "Generali",
     "BMED.MI": "Banca Mediolanum",
 
-    # ETF di riferimento
+    # ETF
     "SWDA.MI": "iShares MSCI World (SWDA)",
     "CSSPX.MI": "iShares S&P 500 (CSSPX)",
     "XEON.MI": "Xtrackers Overnight €STR (XEON)"
 }
 
+# Web Server Keep-Alive
 class SimpleWebServer(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot Directa & Quant Sports Online")
+        self.wfile.write(b"Bot Directa & Intelligence Online")
 
     def log_message(self, format, *args):
         return
@@ -89,26 +87,60 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
+# Gestione Dati Portafoglio e Storico
 def carica_portafoglio():
-    portafoglio = dict(POSIZIONI_PREDEFINITE)
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, "r") as f:
-                dati_salvati = json.load(f)
-                portafoglio.update(dati_salvati)
+                return json.load(f)
         except Exception:
-            pass
-    return portafoglio
+            return {}
+    return dict(POSIZIONI_PREDEFINITE)
 
 def salva_portafoglio(data):
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
+def carica_storico():
+    if os.path.exists(STORICO_FILE):
+        try:
+            with open(STORICO_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+def salva_storico(data):
+    with open(STORICO_FILE, "w") as f:
+        json.dump(data, f, indent=4)
+
+def registra_chiusura_operazione(ticker, nome, quote, pmc, p_uscita, motivo="Vendita Manuale"):
+    pnl_unitario = p_uscita - pmc
+    pnl_totale = pnl_unitario * quote
+    rend_pct = ((p_uscita - pmc) / pmc) * 100.0 if pmc > 0 else 0.0
+
+    operazione = {
+        "ticker": ticker,
+        "nome": nome,
+        "quote": quote,
+        "pmc": pmc,
+        "prezzo_uscita": p_uscita,
+        "pnl_euro": round(pnl_totale, 2),
+        "rendimento_pct": round(rend_pct, 2),
+        "data_chiusura": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "motivo": motivo
+    }
+
+    storico = carica_storico()
+    storico.append(operazione)
+    salva_storico(storico)
+    return operazione
+
+# Analisi Tecnica e Quantitativa
 def calcola_atr(df, period=14):
     high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
     low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
     close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-    
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
@@ -130,10 +162,58 @@ def verifica_regime_ftsemib():
     except Exception:
         return True, 0.0
 
-# ==========================================
-# MOTORI MATEMATICI TENNIS & BASKET
-# ==========================================
+# Modulo Previsionale & Esploratore Notizie Macroeconomiche
+def analizza_notizie_macro():
+    """Raccoglie news finanziarie da fonti aperte e ne stima l'impatto sul listino italiano"""
+    feed_urls = [
+        "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
+        "https://news.google.com/rss/search?q=elezioni+USA+Wall+Street+tassi+BCE+FED&hl=it&gl=IT&ceid=IT:it"
+    ]
 
+    notizie_estratte = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    for url in feed_urls:
+        try:
+            r = requests.get(url, headers=headers, timeout=6)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                for item in root.findall('.//item')[:4]:
+                    titolo = item.find('title').text if item.find('title') is not None else ""
+                    if titolo:
+                        notizie_estratte.append(titolo)
+        except Exception:
+            continue
+
+    parole_bull = ["taglio tassi", "rally", "crescita", "record", "stimoli", "accordo", "fiducia", "utili in aumento"]
+    parole_bear = ["dazi", "inflazione", "guerra", "crisi", "tassi alti", "recessione", "calano gli utili", "spread in aumento"]
+    parole_midterm = ["elezioni", "midterm", "congresso", "casa bianca", "maggioranza", "voto"]
+
+    punteggio = 0
+    rilevanze = []
+
+    for n in notizie_estratte:
+        n_low = n.lower()
+        if any(p in n_low for p in parole_bull):
+            punteggio += 1
+        if any(p in n_low for p in parole_bear):
+            punteggio -= 1
+        if any(p in n_low for p in parole_midterm):
+            rilevanze.append(n)
+
+    if punteggio > 1:
+        sentiment = "🟢 RIALZISTA / PROPENSIONE AL RISCHIO"
+        consiglio = "Favoriti titoli ciclici e industriali (es. Webuild, Maire, BPER, UniCredit)."
+    elif punteggio < -1:
+        sentiment = "🔴 PRUDENTE / AVVERSIONE AL RISCHIO (Dazi/Tassi)"
+        consiglio = "Favorire titoli difensivi ad alto dividendo (Enel, Terna, Snam, Italgas) o liquidità (XEON)."
+    else:
+        sentiment = "🟡 NEUTRO / ATTESA EVENTI"
+        consiglio = "Mantenere operatività selettiva basata unicamente sui supporti tecnici (RSI e Z-Score)."
+
+    return sentiment, notizie_estratte[:5], rilevanze, consiglio
+
+# Moduli Quant Tennis & Basket
 def prob_game_servizio(p):
     if p >= 1.0: return 1.0
     if p <= 0.0: return 0.0
@@ -153,15 +233,13 @@ def prob_tiebreak(pA, pB):
     return prob_vittoria_secca + (prob_6_pari * prob_vantaggi)
 
 async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calcola probabilità Markoviane, Fair Odds ed EV% per il Tennis"""
     args = context.args
     if len(args) < 4:
         msg_help = (
             "🎾 <b>UTILIZZO COMANDO /tennis</b>\n\n"
             "Formato:\n"
             "<code>/tennis &lt;p_serv_A&gt; &lt;p_serv_B&gt; &lt;quota_A&gt; &lt;quota_B&gt;</code>\n\n"
-            "Esempio (A vince il 68% al servizio, B il 63%):\n"
-            "<code>/tennis 0.68 0.63 1.65 2.30</code>"
+            "Esempio:\n<code>/tennis 0.68 0.63 1.65 2.30</code>"
         )
         await update.message.reply_text(msg_help, parse_mode='HTML')
         return
@@ -191,47 +269,28 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     fair_A = 1.0 / prob_match_A
     fair_B = 1.0 / prob_match_B
-
     ev_A = ((quota_A * prob_match_A) - 1.0) * 100
     ev_B = ((quota_B * prob_match_B) - 1.0) * 100
 
-    icon_A = "🔥 VALORE" if ev_A > 2.0 else "⚪"
-    icon_B = "🔥 VALORE" if ev_B > 2.0 else "⚪"
-
     msg = (
-        "🎾 <b>MODELLO MARKOVIANO TENNIS (PUNTO-A-PUNTO)</b>\n\n"
-        f"• Game Servizio A: <code>{gA*100:.1f}%</code> | B: <code>{gB*100:.1f}%</code>\n"
-        f"• Probabilità Set A: <code>{prob_set_A*100:.1f}%</code>\n\n"
-        f"👤 <b>Giocatore A:</b>\n"
-        f"   Probabilità Reale: <b>{prob_match_A*100:.1f}%</b> | Quota Equa: <code>{fair_A:.2f}</code>\n"
-        f"   Quota Book: <code>{quota_A:.2f}</code> ➔ EV: <b>{ev_A:+.2f}%</b> {icon_A}\n\n"
-        f"👤 <b>Giocatore B:</b>\n"
-        f"   Probabilità Reale: <b>{prob_match_B*100:.1f}%</b> | Quota Equa: <code>{fair_B:.2f}</code>\n"
-        f"   Quota Book: <code>{quota_B:.2f}</code> ➔ EV: <b>{ev_B:+.2f}%</b> {icon_B}"
+        "🎾 <b>MODELLO TENNIS PUNTO-A-PUNTO</b>\n\n"
+        f"👤 <b>Giocatore A:</b> Prob <b>{prob_match_A*100:.1f}%</b> | Quota Equa <code>{fair_A:.2f}</code> | EV: <b>{ev_A:+.2f}%</b>\n"
+        f"👤 <b>Giocatore B:</b> Prob <b>{prob_match_B*100:.1f}%</b> | Quota Equa <code>{fair_B:.2f}</code> | EV: <b>{ev_B:+.2f}%</b>"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Calcola Possessi, Spread e Copertura Handicap per il Basket"""
     args = context.args
     if len(args) < 8:
-        msg_help = (
-            "🏀 <b>UTILIZZO COMANDO /basket</b>\n\n"
-            "Formato:\n"
-            "<code>/basket &lt;paceA&gt; &lt;offA&gt; &lt;defA&gt; &lt;paceB&gt; &lt;offB&gt; &lt;defB&gt; &lt;linea_spread&gt; &lt;quota_spread&gt;</code>\n\n"
-            "Esempio (Casa pace 102, off 118, def 112 vs Ospite pace 98, off 113, def 115 su linea -4.5 a 1.91):\n"
-            "<code>/basket 102 118 112 98 113 115 -4.5 1.91</code>"
-        )
-        await update.message.reply_text(msg_help, parse_mode='HTML')
+        await update.message.reply_text("🏀 Formato: <code>/basket &lt;paceA&gt; &lt;offA&gt; &lt;defA&gt; &lt;paceB&gt; &lt;offB&gt; &lt;defB&gt; &lt;linea&gt; &lt;quota&gt;</code>", parse_mode='HTML')
         return
-
     try:
         p_A, o_A, d_A = float(args[0]), float(args[1]), float(args[2])
         p_B, o_B, d_B = float(args[3]), float(args[4]), float(args[5])
         linea_spread = float(args[6].replace(",", "."))
         quota_spread = float(args[7].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Parametri basket non validi.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Parametri non validi.", parse_mode='HTML')
         return
 
     pace_match = (p_A * p_B) / 100.0
@@ -240,8 +299,6 @@ async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     punti_A = (pace_match * (o_A * d_B) / (114.0 * 100.0)) + (home_adv / 2.0)
     punti_B = (pace_match * (o_B * d_A) / (114.0 * 100.0)) - (home_adv / 2.0)
-
-    totale = punti_A + punti_B
     scarto_atteso = punti_A - punti_B
 
     soglia = -linea_spread
@@ -249,29 +306,20 @@ async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prob_copertura = 1.0 - norm.cdf(z)
     fair_odds = 1.0 / prob_copertura if prob_copertura > 0 else 999.0
     ev = ((quota_spread * prob_copertura) - 1.0) * 100
-    icon_ev = "🔥 VALORE" if ev > 2.0 else "⚪"
 
     msg = (
-        "🏀 <b>MODELLO PACE & RATING BASKET</b>\n\n"
-        f"• Possessi Stimati: <code>{pace_match:.1f}</code>\n"
-        f"• Punteggio Atteso: <b>{punti_A:.1f} - {punti_B:.1f}</b>\n"
-        f"• Totale Punti Previsti: <code>{totale:.1f}</code>\n"
-        f"• Spread Modellato: <b>{-scarto_atteso:+.1f}</b> punti\n\n"
-        f"🎯 <b>Valutazione Linea Handicap ({linea_spread:+.1f}):</b>\n"
-        f"• Probabilità Copertura: <b>{prob_copertura*100:.1f}%</b>\n"
-        f"• Quota Equa: <code>{fair_odds:.2f}</code> | Book: <code>{quota_spread:.2f}</code>\n"
-        f"• Expected Value (EV): <b>{ev:+.2f}%</b> {icon_ev}"
+        "🏀 <b>MODELLO BASKET</b>\n\n"
+        f"• Punteggio Stimato: <b>{punti_A:.1f} - {punti_B:.1f}</b>\n"
+        f"• Spread Previsto: <b>{-scarto_atteso:+.1f}</b>\n"
+        f"• Copertura Spread ({linea_spread:+.1f}): <b>{prob_copertura*100:.1f}%</b> | Quota Equa: <code>{fair_odds:.2f}</code> | EV: <b>{ev:+.2f}%</b>"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# ==========================================
-# MONITORAGGIO E SCANSIONE DIRECTA (AZIONI)
-# ==========================================
-
+# Scansione e Monitoraggio Azioni
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Monitoraggio posizioni aperte (Target Dinamici ATR)
+    # 1. Controllo Target Posizioni Aperte
     for ticker, info in list(portafoglio.items()):
         try:
             d = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -292,29 +340,27 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             rend_pct = ((p_live - pmc) / pmc) * 100
 
             if p_live >= tp_dinamico or p_live <= sl_dinamico:
-                tipo = f"🎯 TAKE PROFIT (ATR +2.0x a €{tp_dinamico:.3f})" if p_live >= tp_dinamico else f"⚠️ STOP LOSS (ATR -1.5x a €{sl_dinamico:.3f})"
+                tipo = f"🎯 TAKE PROFIT (+2.0 ATR a €{tp_dinamico:.3f})" if p_live >= tp_dinamico else f"⚠️ STOP LOSS (-1.5 ATR a €{sl_dinamico:.3f})"
                 tastiera = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("✅ Venduto su Directa", callback_data=f"venduto_{ticker}")],
+                    [InlineKeyboardButton("✅ Venduto a Mercato", callback_data=f"venduto_{ticker}_{p_live:.3f}")],
                     [InlineKeyboardButton("⏳ Tieni Posizione", callback_data=f"tieni_{ticker}")]
                 ])
                 msg = (
                     f"🚨 <b>SEGNALE DI USCITA: {info['nome']} ({ticker})</b>\n\n"
                     f"• Condizione: <b>{tipo}</b>\n"
-                    f"• Prezzo di Carico (PMC): <code>€{pmc:.3f}</code>\n"
-                    f"• Prezzo Attuale: <code>€{p_live:.3f}</code>\n"
-                    f"• Performance: <b>{rend_pct:+.2f}%</b>\n"
-                    f"• Quantità: <code>{quote} quote</code>\n\n"
+                    f"• PMC: <code>€{pmc:.3f}</code> ➔ Attuale: <code>€{p_live:.3f}</code>\n"
+                    f"• Performance: <b>{rend_pct:+.2f}%</b> (Quote: {quote})\n\n"
                     f"Hai chiuso l'operazione su Directa?"
                 )
                 await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=msg, parse_mode='HTML', reply_markup=tastiera)
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Controllo Regime FTSE MIB
-    indice_rialzista, idx_val = verifica_regime_ftsemib()
+    # 2. Controllo FTSE MIB
+    indice_rialzista, _ = verifica_regime_ftsemib()
     regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
-    # 3. Scansione Paniere con Volumi, ATR e Z-Score
+    # 3. Scansione Titoli Paniere
     risultati = []
     for ticker, nome in PANIERE.items():
         if ticker in portafoglio:
@@ -339,8 +385,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             g = (delta.where(delta > 0, 0)).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rs = g / l
-            rsi_series = 100 - (100 / (1 + rs))
-            rsi = float(rsi_series.iloc[-1])
+            rsi = float((100 - (100 / (1 + rs))).iloc[-1])
 
             vol_last = float(volume.iloc[-1])
             sma_vol = float(volume.rolling(20).mean().iloc[-1])
@@ -365,40 +410,26 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if p_curr > sma200: score += 8
             else: score -= 12
 
-            if z_score < -1.0 and vol_ratio > 1.6:
-                score -= 15
-            elif z_score >= -1.0 and vol_ratio > 1.3:
-                score += 10
+            if z_score < -1.0 and vol_ratio > 1.6: score -= 15
+            elif z_score >= -1.0 and vol_ratio > 1.3: score += 10
 
             score = int(np.clip(score, 0, 100))
 
             risultati.append({
-                "ticker": ticker,
-                "nome": nome,
-                "prezzo": p_curr,
-                "score": score,
-                "rsi": rsi,
-                "z_score": z_score,
-                "vol_ratio": vol_ratio,
-                "atr": atr,
-                "tp": tp_stimato,
-                "sl": sl_stimato
+                "ticker": ticker, "nome": nome, "prezzo": p_curr,
+                "score": score, "rsi": rsi, "z_score": z_score,
+                "vol_ratio": vol_ratio, "atr": atr, "tp": tp_stimato, "sl": sl_stimato
             })
-        except Exception as e:
-            logging.error(f"Errore scan {ticker}: {e}")
+        except Exception:
             continue
 
     if not risultati:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Scansione completata: nessun dato disponibile al momento.")
         return
 
     risultati.sort(key=lambda x: x["score"], reverse=True)
     top10 = risultati[:10]
 
-    classifica_txt = (
-        f"📊 <b>TOP 10 OPPORTUNITÀ BORSA ITALIANA</b>\n"
-        f"🌐 <i>Regime FTSE MIB: {regime_icon}</i>\n\n"
-    )
+    classifica_txt = f"📊 <b>TOP 10 OPPORTUNITÀ BORSA ITALIANA</b>\n🌐 <i>Regime FTSE MIB: {regime_icon}</i>\n\n"
     for i, item in enumerate(top10, start=1):
         icona = "🔥" if item['score'] >= 55 else "🔹"
         classifica_txt += (
@@ -409,34 +440,15 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         )
     await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=classifica_txt, parse_mode='HTML')
 
-    opportunita = [r for r in top10 if r["score"] >= 55]
-    for opp in opportunita:
-        tastiera = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ Ho Comprato", callback_data=f"buy_{opp['ticker']}_{opp['prezzo']:.3f}")],
-            [InlineKeyboardButton("❌ Ignora", callback_data=f"ignora_{opp['ticker']}")]
-        ])
-        testo_alert = (
-            f"📢 <b>SEGNALE INGRESSO QUANTITATIVO</b>\n\n"
-            f"• <b>{opp['nome']}</b> (<code>{opp['ticker']}</code>)\n"
-            f"• Prezzo: <code>€{opp['prezzo']:.3f}</code> | Score: <b>{opp['score']}/100</b>\n"
-            f"• Volumi: <code>{opp['vol_ratio']:.1f}x media</code> | ATR: <code>€{opp['atr']:.3f}</code>\n"
-            f"• 🎯 Target Dinamico (+2 ATR): <code>€{opp['tp']:.3f}</code>\n"
-            f"• ⚠️ Stop Dinamico (-1.5 ATR): <code>€{opp['sl']:.3f}</code>\n\n"
-            f"Vuoi registrare l'operazione su Directa?"
-        )
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo_alert, parse_mode='HTML', reply_markup=tastiera)
-
 async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
 
+# Comandi Gestione Portafoglio & Vendite
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
-        await update.message.reply_text(
-            "⚠️ Formato non corretto! Esempio:\n<code>/compra ISP.MI 3 5.929</code>",
-            parse_mode='HTML'
-        )
+        await update.message.reply_text("⚠️ Formato: <code>/compra &lt;TICKER&gt; &lt;QUOTE&gt; &lt;PMC&gt;</code>\nEs: <code>/compra ISP.MI 3 5.929</code>", parse_mode='HTML')
         return
 
     ticker_raw = args[0].upper().strip()
@@ -446,7 +458,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         quote = int(args[1])
         pmc = float(args[2].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Quantità o prezzo non validi.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Dati non validi.", parse_mode='HTML')
         return
 
     nome = PANIERE.get(ticker, ticker)
@@ -462,27 +474,235 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ <b>ACQUISTO REGISTRATO!</b>\n\n"
         f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
-        f"• Quantità: <code>{quote} quote</code>\n"
-        f"• Prezzo di Carico: <code>€{pmc:.3f}</code>\n"
+        f"• Quantità: <code>{quote} quote</code> | PMC: <code>€{pmc:.3f}</code>\n"
         f"• Controvalore: <code>€{quote * pmc:.2f}</code>",
         parse_mode='HTML'
     )
 
+async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando manuale per vendere un titolo: /vendi ISP.MI 6.10"""
+    args = context.args
+    if len(args) < 2:
+        await update.message.reply_text(
+            "⚠️ <b>Utilizzo comando /vendi:</b>\n"
+            "<code>/vendi &lt;TICKER&gt; &lt;PREZZO_DI_VENDITA&gt;</code>\n\n"
+            "Esempio:\n<code>/vendi ISP.MI 6.125</code>",
+            parse_mode='HTML'
+        )
+        return
+
+    ticker_raw = args[0].upper().strip()
+    ticker = ticker_raw if ticker_raw.endswith(".MI") else f"{ticker_raw}.MI"
+
+    try:
+        prezzo_vendita = float(args[1].replace(",", "."))
+    except ValueError:
+        await update.message.reply_text("⚠️ Prezzo di vendita non valido.", parse_mode='HTML')
+        return
+
+    portafoglio = carica_portafoglio()
+    if ticker not in portafoglio:
+        await update.message.reply_text(f"⚠️ Il titolo <b>{ticker}</b> non è presente nel portafoglio attivo.", parse_mode='HTML')
+        return
+
+    info = portafoglio[ticker]
+    op = registra_chiusura_operazione(
+        ticker=ticker,
+        nome=info['nome'],
+        quote=info['quote'],
+        pmc=info['pmc'],
+        p_uscita=prezzo_vendita,
+        motivo="Vendita Manuale"
+    )
+
+    del portafoglio[ticker]
+    salva_portafoglio(portafoglio)
+
+    icona_esito = "🟢 PROFITTO" if op['pnl_euro'] >= 0 else "🔴 PERDITA"
+
+    msg = (
+        f"✅ <b>VENDITA REGISTRATA CON SUCCESSO!</b>\n\n"
+        f"• Titolo: <b>{op['nome']}</b> (<code>{ticker}</code>)\n"
+        f"• Quantità chiusa: <code>{op['quote']} quote</code>\n"
+        f"• Prezzo Carico (PMC): <code>€{op['pmc']:.3f}</code>\n"
+        f"• Prezzo Vendita: <code>€{op['prezzo_uscita']:.3f}</code>\n\n"
+        f"📊 <b>RISULTATO OPERAZIONE:</b>\n"
+        f"• Esito: <b>{icona_esito}</b>\n"
+        f"• Guadagno Netto: <b>€{op['pnl_euro']:+.2f}</b>\n"
+        f"• Rendimento: <b>{op['rendimento_pct']:+.2f}%</b>\n\n"
+        f"<i>Il titolo è stato rimosso dal portafoglio e archiviato nello storico.</i>"
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    portafoglio = carica_portafoglio()
+    if not portafoglio:
+        await update.message.reply_text("💼 Nessun titolo attualmente attivo nel portafoglio.")
+        return
+
+    msg = "💼 <b>PORTAFOGLIO ATTIVO & PERFORMANCE LIVE</b>\n\n"
+    totale_investito = 0.0
+    totale_attuale = 0.0
+
+    for t, info in portafoglio.items():
+        pmc = info['pmc']
+        quote = info['quote']
+        p_live = pmc
+        atr_val = pmc * 0.03
+
+        try:
+            d = yf.download(t, period="3mo", interval="1d", progress=False)
+            if not d.empty:
+                if isinstance(d.columns, pd.MultiIndex):
+                    d.columns = d.columns.get_level_values(0)
+                c_series = d['Close'].iloc[:, 0] if isinstance(d['Close'], pd.DataFrame) else d['Close']
+                p_live = float(c_series.iloc[-1])
+                if len(d) >= 15:
+                    atr_val = calcola_atr(d, 14)
+        except Exception:
+            pass
+
+        val_carico = quote * pmc
+        val_live = quote * p_live
+        totale_investito += val_carico
+        totale_attuale += val_live
+
+        rend_attuale = ((p_live - pmc) / pmc) * 100
+        tp_prezzo = pmc + (2.0 * atr_val)
+        sl_prezzo = pmc - (1.5 * atr_val)
+        segno = "🟢" if rend_attuale >= 0 else "🔴"
+
+        msg += (
+            f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
+            f"• Quote: <code>{quote}</code> | Investito: <code>€{val_carico:.2f}</code> ➔ Attuale: <code>€{val_live:.2f}</code>\n"
+            f"• PMC: <code>€{pmc:.3f}</code> ➔ Prezzo: <code>€{p_live:.3f}</code> ({segno} <b>{rend_attuale:+.2f}%</b>)\n"
+            f"• 🎯 Target (+2 ATR): <code>€{tp_prezzo:.3f}</code> | ⚠️ Stop (-1.5 ATR): <code>€{sl_prezzo:.3f}</code>\n"
+            f"────────────────────\n"
+        )
+
+    pnl_totale_euro = totale_attuale - totale_investito
+    pnl_totale_pct = ((totale_attuale - totale_investito) / totale_investito * 100) if totale_investito > 0 else 0.0
+    segno_tot = "🟢" if pnl_totale_euro >= 0 else "🔴"
+
+    msg += (
+        f"💰 <b>RIEPILOGO ASSET:</b>\n"
+        f"• Totale Investito: <code>€{totale_investito:.2f}</code>\n"
+        f"• Valore Corrente: <code>€{totale_attuale:.2f}</code>\n"
+        f"• P&L Non Realizzato: {segno_tot} <b>€{pnl_totale_euro:+.2f} ({pnl_totale_pct:+.2f}%)</b>"
+    )
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra le statistiche storiche di guadagni e perdite consolidate"""
+    storico = carica_storico()
+    if not storico:
+        await update.message.reply_text("📜 Nessuna operazione chiusa registrata nello storico.")
+        return
+
+    tot_pnl = sum(item['pnl_euro'] for item in storico)
+    vinte = [item for item in storico if item['pnl_euro'] > 0]
+    perse = [item for item in storico if item['pnl_euro'] < 0]
+    win_rate = (len(vinte) / len(storico)) * 100 if storico else 0.0
+
+    msg = (
+        f"📜 <b>STORICO OPERAZIONI CHIUSE & GUADAGNI REALI</b>\n\n"
+        f"• Operazioni Concluse: <b>{len(storico)}</b>\n"
+        f"• Win Rate: <b>{win_rate:.1f}%</b> (✅ {len(vinte)} | ❌ {len(perse)})\n"
+        f"• Guadagno/Perdita Totale Netto: <b>€{tot_pnl:+.2f}</b>\n\n"
+        f"<b>Ultime posizioni liquidate:</b>\n"
+    )
+
+    for op in storico[-5:]:
+        icona = "🟢" if op['pnl_euro'] >= 0 else "🔴"
+        msg += (
+            f"{icona} <b>{op['nome']}</b> ({op['data_chiusura']})\n"
+            f"   PMC: <code>€{op['pmc']:.3f}</code> ➔ Uscita: <code>€{op['prezzo_uscita']:.3f}</code>\n"
+            f"   Risultato: <b>€{op['pnl_euro']:+.2f} ({op['rendimento_pct']:+.2f}%)</b>\n"
+        )
+
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Comando previsionale macroeconomico e geopolitico (es. Midterm USA, tassi, inflazione)"""
+    await update.message.reply_text("🌐 Scansione notizie macroeconomiche, geopolitiche e calendario economico in corso...")
+    sentiment, news, rilevanze, consiglio = analizza_notizie_macro()
+
+    msg = (
+        f"🧭 <b>RADAR PREVISIONALE SETTIMANALE & MACRO INTELLIGENCE</b>\n\n"
+        f"📊 <b>Barometro di Sentiment:</b>\n<b>{sentiment}</b>\n\n"
+        f"🔍 <b>Notizie Finanziarie Rilevate:</b>\n"
+    )
+
+    for n in news[:4]:
+        msg += f"• <i>{n}</i>\n"
+
+    if rilevanze:
+        msg += f"\n🗳️ <b>Focus Politico & Midterm USA:</b>\n"
+        for r in rilevanze[:2]:
+            msg += f"📌 <b>{r}</b>\n"
+        msg += (
+            "\n<i>Impatto USA ➔ Borsa Italiana:</i>\n"
+            "Un Congresso diviso o un indebolimento di linee protezionistiche favorisce la stabilità dei dazi europei "
+            "(positivo per Stellantis, Ferrari e industria esportatrice). "
+            "Attenzione alla traiettoria dei tassi FED: tassi più alti rafforzano il Dollaro ma aumentano il costo del debito globale.\n"
+        )
+
+    msg += (
+        f"\n💡 <b>Strategia Operativa Consigliata:</b>\n"
+        f"{consiglio}"
+    )
+
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+# Callback Bottoni Telegram
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data.startswith("buy_"):
+    if data.startswith("venduto_"):
+        parti = data.split("_")
+        ticker = parti[1]
+        p_live = float(parti[2]) if len(parti) > 2 else 0.0
+
+        portafoglio = carica_portafoglio()
+        if ticker in portafoglio:
+            info = portafoglio[ticker]
+            prezzo_chiusura = p_live if p_live > 0 else info['pmc']
+            op = registra_chiusura_operazione(
+                ticker=ticker,
+                nome=info['nome'],
+                quote=info['quote'],
+                pmc=info['pmc'],
+                p_uscita=prezzo_chiusura,
+                motivo="Segnale Stop/Take Profit"
+            )
+            del portafoglio[ticker]
+            salva_portafoglio(portafoglio)
+
+            await query.edit_message_text(
+                f"✅ Posizione su <b>{ticker}</b> chiusa a <code>€{prezzo_chiusura:.3f}</code>!\n"
+                f"P&L: <b>€{op['pnl_euro']:+.2f} ({op['rendimento_pct']:+.2f}%)</b> archiviato nello storico.",
+                parse_mode='HTML'
+            )
+        else:
+            await query.edit_message_text(f"Posizione su {ticker} già chiusa.")
+        return ConversationHandler.END
+
+    elif data.startswith("tieni_"):
+        _, ticker = data.split("_")
+        await query.edit_message_text(f"⏳ Posizione su {ticker} mantenuta in portafoglio.")
+        return ConversationHandler.END
+
+    elif data.startswith("buy_"):
         _, ticker, prezzo = data.split("_")
         context.user_data['pending_ticker'] = ticker
         context.user_data['pending_prezzo'] = float(prezzo)
         context.user_data['nome_titolo'] = PANIERE.get(ticker, ticker)
 
         await query.edit_message_text(
-            f"👍 Segnale confermato per <b>{context.user_data['nome_titolo']}</b>!\n\n"
-            f"👉 <b>Quante quote hai comprato e a che prezzo?</b>\n"
-            f"Rispondi scrivendo ad esempio: <code>3 a {prezzo}</code>",
+            f"👍 Conferma per <b>{context.user_data['nome_titolo']}</b>!\n"
+            f"👉 Rispondi con quote e prezzo (es: <code>3 a {prezzo}</code>):",
             parse_mode='HTML'
         )
         return ATTESA_DETTAGLI_ACQUISTO
@@ -490,20 +710,6 @@ async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data.startswith("ignora_"):
         _, ticker = data.split("_")
         await query.edit_message_text(f"Segnale per {ticker} ignorato.")
-        return ConversationHandler.END
-
-    elif data.startswith("venduto_"):
-        _, ticker = data.split("_")
-        portafoglio = carica_portafoglio()
-        if ticker in portafoglio:
-            del portafoglio[ticker]
-            salva_portafoglio(portafoglio)
-        await query.edit_message_text(f"✅ Posizione su <b>{ticker}</b> chiusa e rimossa dal monitoraggio.", parse_mode='HTML')
-        return ConversationHandler.END
-
-    elif data.startswith("tieni_"):
-        _, ticker = data.split("_")
-        await query.edit_message_text(f"⏳ Posizione su {ticker} mantenuta in portafoglio.", parse_mode='HTML')
         return ConversationHandler.END
 
 async def registra_dettagli_acquisto(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -526,11 +732,9 @@ async def registra_dettagli_acquisto(update: Update, context: ContextTypes.DEFAU
         salva_portafoglio(portafoglio)
 
         await update.message.reply_text(
-            f"✅ <b>REGISTRATO CON SUCCESSO!</b>\n\n"
-            f"• Titolo: <b>{nome}</b>\n"
-            f"• Quantità: <code>{quote} quote</code>\n"
-            f"• Prezzo Medio di Carico: <code>€{pmc:.3f}</code>\n"
-            f"• Controvalore totale: <code>€{quote * pmc:.2f}</code>",
+            f"✅ <b>ACQUISTO REGISTRATO!</b>\n\n"
+            f"• <b>{nome}</b>: <code>{quote} quote</code> a <code>€{pmc:.3f}</code>\n"
+            f"• Totale: <code>€{quote * pmc:.2f}</code>",
             parse_mode='HTML'
         )
     except Exception:
@@ -538,55 +742,6 @@ async def registra_dettagli_acquisto(update: Update, context: ContextTypes.DEFAU
         return ATTESA_DETTAGLI_ACQUISTO
 
     return ConversationHandler.END
-
-async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    portafoglio = carica_portafoglio()
-    if not portafoglio:
-        await update.message.reply_text("💼 Nessun titolo attualmente monitorato nel portafoglio.")
-        return
-
-    msg = "💼 <b>STATO PORTAFOGLIO & PROGRESSIONE OBIETTIVI DINAMICI</b>\n\n"
-
-    for t, info in portafoglio.items():
-        pmc = info['pmc']
-        quote = info['quote']
-
-        p_live = pmc
-        atr_val = pmc * 0.03
-        try:
-            d = yf.download(t, period="3mo", interval="1d", progress=False)
-            if not d.empty:
-                if isinstance(d.columns, pd.MultiIndex):
-                    d.columns = d.columns.get_level_values(0)
-                c_series = d['Close'].iloc[:, 0] if isinstance(d['Close'], pd.DataFrame) else d['Close']
-                p_live = float(c_series.iloc[-1])
-                if len(d) >= 15:
-                    atr_val = calcola_atr(d, 14)
-        except Exception:
-            pass
-
-        tp_prezzo = pmc + (2.0 * atr_val)
-        sl_prezzo = pmc - (1.5 * atr_val)
-
-        rend_attuale = ((p_live - pmc) / pmc) * 100
-        dist_tp = ((tp_prezzo - p_live) / p_live) * 100
-        dist_sl = ((p_live - sl_prezzo) / p_live) * 100
-
-        segno = "🟢" if rend_attuale >= 0 else "🔴"
-
-        msg += (
-            f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
-            f"• Quote: <code>{quote}</code> | Investito: <code>€{quote * pmc:.2f}</code>\n"
-            f"• PMC: <code>€{pmc:.3f}</code> ➔ Attuale: <code>€{p_live:.3f}</code>\n"
-            f"• Rendimento attuale: {segno} <b>{rend_attuale:+.2f}%</b>\n"
-            f"🎯 <b>Target Dinamico (+2 ATR a €{tp_prezzo:.3f}):</b>\n"
-            f"   Mancano: <b>{dist_tp:+.2f}%</b> al traguardo\n"
-            f"⚠️ <b>Soglia Stop Dinamico (-1.5 ATR a €{sl_prezzo:.3f}):</b>\n"
-            f"   Margine di sicurezza: <b>{dist_sl:.2f}%</b> prima dello stop\n"
-            f"────────────────────\n"
-        )
-
-    await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🔍 Avvio scansione quantitativa con Volumi, Regime FTSE MIB e ATR...")
@@ -624,10 +779,8 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Base Pre-Crollo: <code>€{prezzo_base:.5f}</code>\n"
         f"• Prezzo Attuale: <code>€{prezzo_live:.5f}</code>\n"
         f"• Variazione dal Crollo: {icona_diff} <b>{diff_base:+.2f}%</b>\n\n"
-        f"🎯 <b>Target Profitto (+2σ a €{upper_band:.5f}):</b>\n"
-        f"   Distanza: <b>{manca_tp:+.2f}%</b> dal picco statistico\n\n"
-        f"⚠️ <b>Supporto Accumulo (-2σ a €{lower_band:.5f}):</b>\n"
-        f"   Margine: <b>{margine_sl:.2f}%</b> dalla soglia\n"
+        f"🎯 <b>Target Profitto (+2σ a €{upper_band:.5f}):</b> Mancano <b>{manca_tp:+.2f}%</b>\n"
+        f"⚠️ <b>Supporto Accumulo (-2σ a €{lower_band:.5f}):</b> Margine <b>{margine_sl:.2f}%</b>"
     )
     await update.message.reply_text(testo, parse_mode='HTML')
 
@@ -646,7 +799,10 @@ def main():
 
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("compra", cmd_compra))
+    app.add_handler(CommandHandler("vendi", cmd_vendi))
     app.add_handler(CommandHandler("portafoglio", cmd_portafoglio))
+    app.add_handler(CommandHandler("storico", cmd_storico))
+    app.add_handler(CommandHandler("outlook", cmd_outlook))
     app.add_handler(CommandHandler("scan", cmd_scan))
     app.add_handler(CommandHandler("doge", cmd_doge))
     app.add_handler(CommandHandler("tennis", cmd_tennis))
@@ -655,7 +811,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram avviato con moduli Finanza, Crypto, Tennis e Basket...")
+    print("🤖 Bot Telegram avviato con moduli Finanza, Storico P&L, News Intelligence Macro, Tennis e Basket...")
     app.run_polling()
 
 if __name__ == "__main__":
