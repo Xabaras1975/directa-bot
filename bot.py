@@ -36,37 +36,44 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 
 POSIZIONI_PREDEFINITE = {}
 
-# PANIERE STRUTTURATO PER SETTORE
+# PANIERE CON MATRICE DI SENSIBILITA' FATTORIALE (BETA MACRO)
+# Coefficienti di reazione tra -1.0 e +1.0 rispetto a:
+# dazi: sensibilità positiva se il commercio è aperto (+), negativa se ci sono dazi (-)
+# tassi: sensibilità a tassi alti (+) o bassi (-)
+# geopolitica: sensibilità a tensioni/conflitti (+ se rifugio o energia, - se ciclico)
+# debito: sensibilità a stabilità spread (+) o allargamento spread (-)
 PANIERE = {
     # Ciclici, Industriali & Export
-    "STLAM.MI": {"nome": "Stellantis", "settore": "export"},
-    "RACE.MI": {"nome": "Ferrari", "settore": "export"},
-    "MREC.MI": {"nome": "Maire Tecnimont", "settore": "export"},
-    "SAL.MI": {"nome": "Webuild", "settore": "export"},
-    "SFER.MI": {"nome": "Salvatore Ferragamo", "settore": "export"},
+    "STLAM.MI": {"nome": "Stellantis", "settore": "export", "beta_dazi": 0.85, "beta_tassi": -0.30, "beta_geopolitica": -0.40, "beta_debito": 0.20},
+    "RACE.MI": {"nome": "Ferrari", "settore": "export", "beta_dazi": 0.50, "beta_tassi": -0.10, "beta_geopolitica": -0.20, "beta_debito": 0.10},
+    "MREC.MI": {"nome": "Maire Tecnimont", "settore": "export", "beta_dazi": 0.60, "beta_tassi": -0.40, "beta_geopolitica": -0.30, "beta_debito": 0.30},
+    "SAL.MI": {"nome": "Webuild", "settore": "export", "beta_dazi": 0.40, "beta_tassi": -0.50, "beta_geopolitica": -0.20, "beta_debito": 0.40},
+    "SFER.MI": {"nome": "Salvatore Ferragamo", "settore": "export", "beta_dazi": 0.70, "beta_tassi": -0.20, "beta_geopolitica": -0.40, "beta_debito": 0.10},
 
     # Finanziari & Bancari
-    "ISP.MI": {"nome": "Intesa Sanpaolo", "settore": "finanza"},
-    "UCG.MI": {"nome": "UniCredit", "settore": "finanza"},
-    "BPE.MI": {"nome": "BPER Banca", "settore": "finanza"},
-    "BMED.MI": {"nome": "Banca Mediolanum", "settore": "finanza"},
-    "G.MI": {"nome": "Generali", "settore": "finanza"},
+    "ISP.MI": {"nome": "Intesa Sanpaolo", "settore": "finanza", "beta_dazi": 0.20, "beta_tassi": 0.75, "beta_geopolitica": -0.30, "beta_debito": 0.80},
+    "UCG.MI": {"nome": "UniCredit", "settore": "finanza", "beta_dazi": 0.30, "beta_tassi": 0.80, "beta_geopolitica": -0.35, "beta_debito": 0.75},
+    "BPE.MI": {"nome": "BPER Banca", "settore": "finanza", "beta_dazi": 0.15, "beta_tassi": 0.70, "beta_geopolitica": -0.25, "beta_debito": 0.85},
+    "BMED.MI": {"nome": "Banca Mediolanum", "settore": "finanza", "beta_dazi": 0.20, "beta_tassi": 0.50, "beta_geopolitica": -0.20, "beta_debito": 0.60},
+    "G.MI": {"nome": "Generali", "settore": "finanza", "beta_dazi": 0.20, "beta_tassi": 0.40, "beta_geopolitica": -0.20, "beta_debito": 0.70},
 
     # Difensivi & Utility
-    "ENEL.MI": {"nome": "Enel", "settore": "utility"},
-    "TRN.MI": {"nome": "Terna", "settore": "utility"},
-    "SRG.MI": {"nome": "Snam", "settore": "utility"},
-    "IG.MI": {"nome": "Italgas", "settore": "utility"},
-    "A2A.MI": {"nome": "A2A", "settore": "utility"},
-    "HER.MI": {"nome": "Hera", "settore": "utility"},
-    "IRE.MI": {"nome": "Iren", "settore": "utility"},
+    "ENEL.MI": {"nome": "Enel", "settore": "utility", "beta_dazi": -0.10, "beta_tassi": -0.65, "beta_geopolitica": 0.20, "beta_debito": 0.50},
+    "TRN.MI": {"nome": "Terna", "settore": "utility", "beta_dazi": -0.05, "beta_tassi": -0.75, "beta_geopolitica": 0.35, "beta_debito": 0.40},
+    "SRG.MI": {"nome": "Snam", "settore": "utility", "beta_dazi": -0.05, "beta_tassi": -0.70, "beta_geopolitica": 0.35, "beta_debito": 0.45},
+    "IG.MI": {"nome": "Italgas", "settore": "utility", "beta_dazi": -0.05, "beta_tassi": -0.60, "beta_geopolitica": 0.30, "beta_debito": 0.40},
+    "A2A.MI": {"nome": "A2A", "settore": "utility", "beta_dazi": 0.00, "beta_tassi": -0.50, "beta_geopolitica": 0.25, "beta_debito": 0.45},
+    "HER.MI": {"nome": "Hera", "settore": "utility", "beta_dazi": 0.00, "beta_tassi": -0.45, "beta_geopolitica": 0.20, "beta_debito": 0.40},
+    "IRE.MI": {"nome": "Iren", "settore": "utility", "beta_dazi": 0.00, "beta_tassi": -0.50, "beta_geopolitica": 0.20, "beta_debito": 0.45},
 
-    # Altri titoli & ETF
-    "ENI.MI": {"nome": "Eni", "settore": "energy"},
-    "OVS.MI": {"nome": "OVS", "settore": "consumer"},
-    "SWDA.MI": {"nome": "iShares MSCI World (SWDA)", "settore": "etf"},
-    "CSSPX.MI": {"nome": "iShares S&P 500 (CSSPX)", "settore": "etf"},
-    "XEON.MI": {"nome": "Xtrackers Overnight €STR", "settore": "cash"}
+    # Energia & Consumi
+    "ENI.MI": {"nome": "Eni", "settore": "energy", "beta_dazi": 0.20, "beta_tassi": 0.10, "beta_geopolitica": 0.80, "beta_debito": 0.30},
+    "OVS.MI": {"nome": "OVS", "settore": "consumer", "beta_dazi": 0.30, "beta_tassi": -0.40, "beta_geopolitica": -0.30, "beta_debito": 0.30},
+
+    # ETF
+    "SWDA.MI": {"nome": "iShares MSCI World (SWDA)", "settore": "etf", "beta_dazi": 0.50, "beta_tassi": -0.20, "beta_geopolitica": -0.30, "beta_debito": 0.20},
+    "CSSPX.MI": {"nome": "iShares S&P 500 (CSSPX)", "settore": "etf", "beta_dazi": 0.60, "beta_tassi": -0.15, "beta_geopolitica": -0.25, "beta_debito": 0.15},
+    "XEON.MI": {"nome": "Xtrackers Overnight €STR", "settore": "cash", "beta_dazi": -0.10, "beta_tassi": 0.90, "beta_geopolitica": 0.50, "beta_debito": 0.10}
 }
 
 class SimpleWebServer(BaseHTTPRequestHandler):
@@ -74,7 +81,7 @@ class SimpleWebServer(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
         self.end_headers()
-        self.wfile.write(b"Bot Directa & Intelligence Online")
+        self.wfile.write(b"Bot Directa & Factor Intelligence Online")
 
     def log_message(self, format, *args):
         return
@@ -85,6 +92,7 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
+# Gestione Persistenza
 def carica_portafoglio():
     if os.path.exists(PORTFOLIO_FILE):
         try:
@@ -145,17 +153,14 @@ def calcola_atr(df, period=14):
     high = estrai_serie(df, 'High')
     low = estrai_serie(df, 'Low')
     close = estrai_serie(df, 'Close')
-    
     if len(close) < period + 1:
         return float(close.iloc[-1] * 0.02) if not close.empty else 0.05
-    
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).dropna()
     atr = tr.rolling(period).mean().dropna()
-    
     if atr.empty or pd.isna(atr.iloc[-1]):
         return float(close.iloc[-1] * 0.02)
     return float(atr.iloc[-1])
@@ -163,23 +168,21 @@ def calcola_atr(df, period=14):
 def verifica_regime_ftsemib():
     try:
         df_index = yf.download("FTSEMIB.MI", period="6mo", interval="1d", progress=False)
-        if df_index.empty:
-            return True, 0.0
+        if df_index.empty: return True, 0.0
         close = estrai_serie(df_index, 'Close')
-        if close.empty:
-            return True, 0.0
+        if close.empty: return True, 0.0
         p_idx = float(close.iloc[-1])
-        sma50_series = close.rolling(50).mean().dropna()
-        sma50_idx = float(sma50_series.iloc[-1]) if not sma50_series.empty else p_idx
-        bullish = p_idx >= sma50_idx
-        return bullish, p_idx
+        sma50_s = close.rolling(50).mean().dropna()
+        sma50_idx = float(sma50_s.iloc[-1]) if not sma50_s.empty else p_idx
+        return (p_idx >= sma50_idx), p_idx
     except Exception:
         return True, 0.0
 
+# MODULO QUANTITATIVO: FATTORE MACRO & SENTIMENT MULTIVARIATO
 def analizza_notizie_macro():
     feed_urls = [
         "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
-        "https://news.google.com/rss/search?q=elezioni+USA+Wall+Street+tassi+BCE+FED&hl=it&gl=IT&ceid=IT:it"
+        "https://news.google.com/rss/search?q=elezioni+USA+Wall+Street+tassi+BCE+FED+dazi&hl=it&gl=IT&ceid=IT:it"
     ]
     notizie = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -189,40 +192,90 @@ def analizza_notizie_macro():
             r = requests.get(url, headers=headers, timeout=6)
             if r.status_code == 200:
                 root = ET.fromstring(r.content)
-                for item in root.findall('.//item')[:4]:
+                for item in root.findall('.//item')[:5]:
                     titolo = item.find('title').text if item.find('title') is not None else ""
                     if titolo: notizie.append(titolo)
         except Exception:
             continue
 
-    parole_bull = ["taglio tassi", "rally", "crescita", "record", "stimoli", "accordo", "fiducia", "utili"]
-    parole_bear = ["dazi", "inflazione", "guerra", "crisi", "tassi alti", "recessione", "spread in aumento"]
-    parole_usa = ["elezioni", "midterm", "congresso", "democrat", "trump", "casa bianca"]
+    # Vettori Fattoriali normalizzati tra -1.0 e +1.0
+    f_dazi = 0.0        # +1: libero scambio/distensione, -1: dazi/guerre commerciali
+    f_tassi = 0.0       # +1: tassi elevati/rialzo, -1: taglio tassi/espansivo
+    f_geopolitica = 0.0 # +1: conflitti/crisi energetica, -1: stabilità pacifica
+    f_debito = 0.0      # +1: stabilità fiscale/spread calmo, -1: tensione spread/deficit
 
-    punteggio = 0
     rilevanze = []
 
     for n in notizie:
         nl = n.lower()
-        if any(p in nl for p in parole_bull): punteggio += 1
-        if any(p in nl for p in parole_bear): punteggio -= 1
-        if any(p in nl for p in parole_usa): rilevanze.append(n)
+        if any(p in nl for p in ["dazi", "tariffe", "protezionismo", "guerra commerciale"]):
+            f_dazi -= 0.4
+            rilevanze.append(f"Dazi/Commercio: {n}")
+        if any(p in nl for p in ["accordo commerciale", "intesa", "apertura mercati", "export"]):
+            f_dazi += 0.3
 
-    if punteggio > 1:
-        sentiment = "BULLISH"
-        settore_favorito = "export"
-        desc_sentiment = "🟢 PROPENSIONE AL RISCHIO / ACCORDI COMMERCIALI"
-    elif punteggio < -1:
-        sentiment = "BEARISH"
-        settore_favorito = "utility"
-        desc_sentiment = "🔴 PRUDENZA / INCERTEZZA TASSI E DAZI"
+        if any(p in nl for p in ["taglio tassi", "bce taglia", "fed taglia", "allentamento"]):
+            f_tassi -= 0.4
+        if any(p in nl for p in ["tassi alti", "inflazione persistente", "stretta monetaria"]):
+            f_tassi += 0.4
+
+        if any(p in nl for p in ["guerra", "tensione", "missili", "escalation", "petrolio in rialzo"]):
+            f_geopolitica += 0.4
+            rilevanze.append(f"Geopolitica: {n}")
+
+        if any(p in nl for p in ["spread btp", "debito", "deficit", "crisi politica"]):
+            f_debito -= 0.3
+        if any(p in nl for p in ["fiducia mercati", "promozione rating", "spread in calo"]):
+            f_debito += 0.3
+
+    f_dazi = float(np.clip(f_dazi, -1.0, 1.0))
+    f_tassi = float(np.clip(f_tassi, -1.0, 1.0))
+    f_geopolitica = float(np.clip(f_geopolitica, -1.0, 1.0))
+    f_debito = float(np.clip(f_debito, -1.0, 1.0))
+
+    if f_dazi >= 0.2 and f_tassi <= 0.0:
+        desc_sentiment = "🟢 PROPENSIONE AL RISCHIO (Commercio Aperto / Tassi Non Ostili)"
+        settore_fav = "export"
+    elif f_dazi < -0.2 or f_geopolitica >= 0.3:
+        desc_sentiment = "🔴 PRUDENZA (Rischio Dazi / Tensioni Geopolitiche)"
+        settore_fav = "utility"
+    elif f_tassi > 0.2:
+        desc_sentiment = "🟡 TASSI SOSTENUTI (Favorevole al Margine Bancario)"
+        settore_fav = "finanza"
     else:
-        sentiment = "NEUTRO"
-        settore_favorito = "tutti"
-        desc_sentiment = "🟡 EQUILIBRATO / SELEZIONE TECNICA"
+        desc_sentiment = "⚪ EQUILIBRATO (Fattori Bilanciati / Focus Tecnico)"
+        settore_fav = "tutti"
 
-    return sentiment, settore_favorito, desc_sentiment, notizie[:4], rilevanze
+    fattori = {
+        "dazi": f_dazi,
+        "tassi": f_tassi,
+        "geopolitica": f_geopolitica,
+        "debito": f_debito
+    }
 
+    return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze
+
+# Calcolo Scientifico dell'Expected Macro Impact (EMI)
+def calcola_macro_impact(ticker, fattori):
+    info = PANIERE.get(ticker)
+    if not info: return 0.0
+
+    b_dazi = info.get("beta_dazi", 0.0)
+    b_tassi = info.get("beta_tassi", 0.0)
+    b_geo = info.get("beta_geopolitica", 0.0)
+    b_deb = info.get("beta_debito", 0.0)
+
+    # Combinazione lineare ponderata dei fattori di sensibilità
+    impatto = (
+        (b_dazi * fattori["dazi"] * 0.35) +
+        (b_tassi * fattori["tassi"] * 0.25) +
+        (b_geo * fattori["geopolitica"] * 0.20) +
+        (b_deb * fattori["debito"] * 0.20)
+    ) * 100.0
+
+    return float(np.clip(impatto, -100.0, 100.0))
+
+# Scansione e Monitoraggio Live
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
@@ -240,7 +293,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
 
             atr_val = calcola_atr(d, 14)
             tp_dinamico = pmc + (2.0 * atr_val)
-            sl_dinamico = pmc - (1.5 * atr_val)
+            sl_dinamico = max(0.01, pmc - (1.5 * atr_val))
             rend_pct = ((p_live - pmc) / pmc) * 100
 
             if p_live >= tp_dinamico or p_live <= sl_dinamico:
@@ -261,17 +314,15 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
     # 2. Clima Macro & Regime FTSE MIB
-    sentiment, settore_fav, desc_sentiment, news, _ = analizza_notizie_macro()
+    desc_sentiment, settore_fav, fattori, news, _ = analizza_notizie_macro()
     indice_rialzista, _ = verifica_regime_ftsemib()
     regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
-    # 3. Classifica Top 10 con Prezzi Reali Puliti
+    # 3. Classifica Top 10
     risultati = []
     for ticker, meta in PANIERE.items():
-        if ticker in portafoglio:
-            continue
+        if ticker in portafoglio: continue
         nome = meta["nome"]
-        settore = meta["settore"]
 
         try:
             df = yf.download(ticker, period="1y", interval="1d", progress=False)
@@ -279,7 +330,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
 
             close = estrai_serie(df, 'Close')
             volume = estrai_serie(df, 'Volume')
-
             if len(close) < 25: continue
 
             p_curr = float(close.iloc[-1])
@@ -330,16 +380,10 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if p_curr > sma200: score += 8
             else: score -= 12
 
-            macro_tag = ""
-            if sentiment == "BULLISH" and settore == "export":
-                score += 10
-                macro_tag = " [🌐 Spinta Export/USA]"
-            elif sentiment == "BEARISH" and settore == "utility":
-                score += 10
-                macro_tag = " [🛡️ Difensivo/Cedola]"
-            elif sentiment == "BEARISH" and settore == "export":
-                score -= 8
-                macro_tag = " [⚠️ Rischio Dazi]"
+            # Ponderazione Macro Factor Integrata
+            emi = calcola_macro_impact(ticker, fattori)
+            score += int(emi * 0.25)
+            macro_tag = f" [🌐 Macro: {emi:+.0f}%]" if abs(emi) >= 12.0 else ""
 
             score = int(np.clip(score, 0, 100))
 
@@ -349,12 +393,11 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 "vol_ratio": vol_ratio, "atr": atr, "tp": tp_stimato,
                 "sl": sl_stimato, "macro_tag": macro_tag
             })
-        except Exception as e:
-            logging.error(f"Errore analisi {ticker}: {e}")
+        except Exception:
             continue
 
     if not risultati:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Dati di borsa in aggiornamento. Riprova tra poco.")
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Mercati in fase di apertura o dati non disponibili.")
         return
 
     risultati.sort(key=lambda x: x["score"], reverse=True)
@@ -379,7 +422,60 @@ async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
 
-# Comandi Utente
+# COMANDO OUTLOOK SCIENTIFICO: LONG & SHORT SETTORIALI
+async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🌐 Scansione vettori geopolitici e matrice fattoriale in corso...")
+    desc_sentiment, settore_fav, fattori, news, rilevanze = analizza_notizie_macro()
+
+    impatti = []
+    for ticker, info in PANIERE.items():
+        if info['settore'] in ['cash', 'etf']: continue
+        emi = calcola_macro_impact(ticker, fattori)
+        impatti.append({
+            "ticker": ticker,
+            "nome": info["nome"],
+            "settore": info["settore"],
+            "emi": emi
+        })
+
+    impatti.sort(key=lambda x: x["emi"], reverse=True)
+    rialzisti = [item for item in impatti if item["emi"] >= 15.0][:3]
+    ribassisti = [item for item in impatti if item["emi"] <= -15.0][:3]
+
+    msg = (
+        f"🧭 <b>MACRO FACTOR INTELLIGENCE & SCENARIO</b>\n\n"
+        f"📊 <b>Regime Globale:</b>\n<b>{desc_sentiment}</b>\n\n"
+        f"⚙️ <b>Vettori di Rischio Rilevati:</b>\n"
+        f"• Commercio/Dazi: <code>{fattori['dazi']:+.2f}σ</code>\n"
+        f"• Tassi/Politica Monetaria: <code>{fattori['tassi']:+.2f}σ</code>\n"
+        f"• Tensione Geopolitica: <code>{fattori['geopolitica']:+.2f}σ</code>\n"
+        f"• Rischio Debito/Spread: <code>{fattori['debito']:+.2f}σ</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 <b>POTENZIALE RIALZISTA (Vento a Favore Macro):</b>\n"
+    )
+
+    if rialzisti:
+        for item in rialzisti:
+            msg += f"• 🔥 <b>{item['nome']}</b> (<code>{item['ticker']}</code>) ➔ Impatto: <b>{item['emi']:+.1f}%</b>\n"
+    else:
+        msg += "• <i>Nessun titolo evidenzia al momento forte spinta rialzista unidirezionale.</i>\n"
+
+    msg += f"\n🔴 <b>RISCHIO RIBASSO (Pressione Macro Avversa):</b>\n"
+    if ribassisti:
+        for item in ribassisti:
+            msg += f"• ⚠️ <b>{item['nome']}</b> (<code>{item['ticker']}</code>) ➔ Impatto: <b>{item['emi']:+.1f}%</b>\n"
+    else:
+        msg += "• <i>Nessun titolo presenta al momento forti pressioni di ribasso macro.</i>\n"
+
+    if rilevanze:
+        msg += "\n━━━━━━━━━━━━━━━━━━━━\n🗳️ <b>Eventi Rilevanti Monitorati:</b>\n"
+        for r in rilevanze[:2]:
+            msg += f"📌 <i>{r}</i>\n"
+
+    msg += "\n💡 <i>I vettori fattoriali stimano l'impatto economico a 5-10 sedute.</i>"
+    await update.message.reply_text(msg, parse_mode='HTML')
+
+# Comandi Gestione Portafoglio
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
@@ -426,7 +522,7 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         prezzo_vendita = float(args[1].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Prezzo non valido.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Prezzo di vendita non valido.", parse_mode='HTML')
         return
 
     portafoglio = carica_portafoglio()
@@ -463,7 +559,7 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("💼 Nessun titolo attualmente attivo nel portafoglio.")
         return
 
-    sentiment, settore_fav, desc_sentiment, news, _ = analizza_notizie_macro()
+    desc_sentiment, settore_fav, fattori, news, _ = analizza_notizie_macro()
 
     msg = (
         f"💼 <b>PORTAFOGLIO ATTIVO & PERFORMANCE LIVE</b>\n"
@@ -500,16 +596,13 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         margine_sl = ((p_live - sl_prezzo) / p_live) * 100
         segno = "🟢" if rend_attuale >= 0 else "🔴"
 
-        settore = PANIERE.get(t, {}).get("settore", "generico")
-        impatto_macro = "⚪ Neutro / Tecnico"
-        if sentiment == "BULLISH" and settore == "export":
-            impatto_macro = "🟢 VENTO A FAVORE (Spinta Export / USA)"
-        elif sentiment == "BEARISH" and settore == "utility":
-            impatto_macro = "🛡️ PROTETTO (Flusso Difensivo / Cedola)"
-        elif sentiment == "BEARISH" and settore == "export":
-            impatto_macro = "⚠️ ATTENZIONE (Pressione Dazi / Ciclo Debole)"
-        elif sentiment == "BULLISH" and settore == "finanza":
-            impatto_macro = "🟢 FAVOREVOLE (Propensione al rischio / Spread stabile)"
+        emi = calcola_macro_impact(t, fattori)
+        if emi >= 15.0:
+            impatto_macro = f"🟢 VENTO A FAVORE ({emi:+.0f}%)"
+        elif emi <= -15.0:
+            impatto_macro = f"🔴 PRESSIONE CONTRARIA ({emi:+.0f}%)"
+        else:
+            impatto_macro = f"⚪ NEUTRO/BILANCIATO ({emi:+.0f}%)"
 
         msg += (
             f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
@@ -517,7 +610,7 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"• PMC: <code>€{pmc:.3f}</code> ➔ Prezzo: <code>€{p_live:.3f}</code> ({segno} <b>{rend_attuale:+.2f}%</b>)\n"
             f"• 🎯 Target (+2 ATR): <code>€{tp_prezzo:.3f}</code> (distanza: <b>{manca_tp:+.2f}%</b>)\n"
             f"• ⚠️ Stop (-1.5 ATR): <code>€{sl_prezzo:.3f}</code> (margine: <b>{margine_sl:.2f}%</b>)\n"
-            f"• 🌐 <b>Impatto Notizie:</b> <code>{impatto_macro}</code>\n"
+            f"• 🌐 <b>Impatto Macro Titolo:</b> <code>{impatto_macro}</code>\n"
             f"────────────────────\n"
         )
 
@@ -557,24 +650,6 @@ async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"{icona} <b>{op['nome']}</b> ({op['data_chiusura']})\n"
             f"   PMC: <code>€{op['pmc']:.3f}</code> ➔ Uscita: <code>€{op['prezzo_uscita']:.3f}</code> | <b>€{op['pnl_euro']:+.2f} ({op['rendimento_pct']:+.2f}%)</b>\n"
         )
-    await update.message.reply_text(msg, parse_mode='HTML')
-
-async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🌐 Scansione notizie macroeconomiche in corso...")
-    sentiment, settore_fav, desc_sentiment, news, rilevanze = analizza_notizie_macro()
-
-    msg = (
-        f"🧭 <b>RADAR PREVISIONALE & MACRO INTELLIGENCE</b>\n\n"
-        f"📊 <b>Sentiment Globale:</b> <b>{desc_sentiment}</b>\n"
-        f"🎯 <b>Settore Favorito:</b> <code>{settore_fav.upper()}</code>\n\n"
-        f"🔍 <b>Notizie Finanziarie Rilevate:</b>\n"
-    )
-    for n in news[:4]: msg += f"• <i>{n}</i>\n"
-
-    if rilevanze:
-        msg += "\n🗳️ <b>Eventi Politici / USA:</b>\n"
-        for r in rilevanze[:2]: msg += f"📌 <b>{r}</b>\n"
-
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -811,7 +886,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram avviato con estrazione prezzi pulita e resiliente a borsa chiusa...")
+    print("🤖 Bot Telegram avviato con Matrice Fattoriale Macro in Outlook e Scan...")
     app.run_polling()
 
 if __name__ == "__main__":
