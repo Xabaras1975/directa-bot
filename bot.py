@@ -37,11 +37,6 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 POSIZIONI_PREDEFINITE = {}
 
 # PANIERE CON MATRICE DI SENSIBILITA' FATTORIALE (BETA MACRO)
-# Coefficienti di reazione tra -1.0 e +1.0 rispetto a:
-# dazi: sensibilità positiva se il commercio è aperto (+), negativa se ci sono dazi (-)
-# tassi: sensibilità a tassi alti (+) o bassi (-)
-# geopolitica: sensibilità a tensioni/conflitti (+ se rifugio o energia, - se ciclico)
-# debito: sensibilità a stabilità spread (+) o allargamento spread (-)
 PANIERE = {
     # Ciclici, Industriali & Export
     "STLAM.MI": {"nome": "Stellantis", "settore": "export", "beta_dazi": 0.85, "beta_tassi": -0.30, "beta_geopolitica": -0.40, "beta_debito": 0.20},
@@ -92,7 +87,6 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
-# Gestione Persistenza
 def carica_portafoglio():
     if os.path.exists(PORTFOLIO_FILE):
         try:
@@ -178,7 +172,6 @@ def verifica_regime_ftsemib():
     except Exception:
         return True, 0.0
 
-# MODULO QUANTITATIVO: FATTORE MACRO & SENTIMENT MULTIVARIATO
 def analizza_notizie_macro():
     feed_urls = [
         "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
@@ -198,11 +191,10 @@ def analizza_notizie_macro():
         except Exception:
             continue
 
-    # Vettori Fattoriali normalizzati tra -1.0 e +1.0
-    f_dazi = 0.0        # +1: libero scambio/distensione, -1: dazi/guerre commerciali
-    f_tassi = 0.0       # +1: tassi elevati/rialzo, -1: taglio tassi/espansivo
-    f_geopolitica = 0.0 # +1: conflitti/crisi energetica, -1: stabilità pacifica
-    f_debito = 0.0      # +1: stabilità fiscale/spread calmo, -1: tensione spread/deficit
+    f_dazi = 0.0
+    f_tassi = 0.0
+    f_geopolitica = 0.0
+    f_debito = 0.0
 
     rilevanze = []
 
@@ -255,7 +247,6 @@ def analizza_notizie_macro():
 
     return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze
 
-# Calcolo Scientifico dell'Expected Macro Impact (EMI)
 def calcola_macro_impact(ticker, fattori):
     info = PANIERE.get(ticker)
     if not info: return 0.0
@@ -265,7 +256,6 @@ def calcola_macro_impact(ticker, fattori):
     b_geo = info.get("beta_geopolitica", 0.0)
     b_deb = info.get("beta_debito", 0.0)
 
-    # Combinazione lineare ponderata dei fattori di sensibilità
     impatto = (
         (b_dazi * fattori["dazi"] * 0.35) +
         (b_tassi * fattori["tassi"] * 0.25) +
@@ -274,6 +264,57 @@ def calcola_macro_impact(ticker, fattori):
     ) * 100.0
 
     return float(np.clip(impatto, -100.0, 100.0))
+
+# COMANDO OUTLOOK OTTIMIZZATO: CLASSIFICA SEMPRE VISIBILE CON RANKING DINAMICO
+async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🌐 Scansione vettori geopolitici e matrice fattoriale in corso...")
+    desc_sentiment, settore_fav, fattori, news, rilevanze = analizza_notizie_macro()
+
+    impatti = []
+    for ticker, info in PANIERE.items():
+        if info['settore'] in ['cash', 'etf']: continue
+        emi = calcola_macro_impact(ticker, fattori)
+        impatti.append({
+            "ticker": ticker,
+            "nome": info["nome"],
+            "settore": info["settore"],
+            "emi": emi
+        })
+
+    impatti.sort(key=lambda x: x["emi"], reverse=True)
+
+    # Prende sempre i primi 3 e gli ultimi 3 in ordine di convenienza relativa
+    top_long = impatti[:3]
+    top_short = sorted(impatti[-3:], key=lambda x: x["emi"])
+
+    msg = (
+        f"🧭 <b>MACRO FACTOR INTELLIGENCE & SCENARIO</b>\n\n"
+        f"📊 <b>Regime Globale:</b>\n<b>{desc_sentiment}</b>\n\n"
+        f"⚙️ <b>Vettori di Rischio Rilevati:</b>\n"
+        f"• Commercio/Dazi: <code>{fattori['dazi']:+.2f}σ</code>\n"
+        f"• Tassi/Politica Monetaria: <code>{fattori['tassi']:+.2f}σ</code>\n"
+        f"• Tensione Geopolitica: <code>{fattori['geopolitica']:+.2f}σ</code>\n"
+        f"• Rischio Debito/Spread: <code>{fattori['debito']:+.2f}σ</code>\n\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🟢 <b>POTENZIALE RIALZISTA (Vento a Favore Relativo):</b>\n"
+    )
+
+    for item in top_long:
+        ico = "🔥" if item["emi"] >= 10.0 else "🔹"
+        msg += f"• {ico} <b>{item['nome']}</b> (<code>{item['ticker']}</code>) ➔ Impatto: <b>{item['emi']:+.1f}%</b>\n"
+
+    msg += f"\n🔴 <b>RISCHIO RIBASSO (Pressione Macro Relativa):</b>\n"
+    for item in top_short:
+        ico = "⚠️" if item["emi"] <= -5.0 else "🔸"
+        msg += f"• {ico} <b>{item['nome']}</b> (<code>{item['ticker']}</code>) ➔ Impatto: <b>{item['emi']:+.1f}%</b>\n"
+
+    if rilevanze:
+        msg += "\n━━━━━━━━━━━━━━━━━━━━\n🗳️ <b>Eventi Rilevanti Monitorati:</b>\n"
+        for r in rilevanze[:2]:
+            msg += f"📌 <i>{r}</i>\n"
+
+    msg += "\n💡 <i>I vettori fattoriali stimano l'impatto economico a 5-10 sedute.</i>"
+    await update.message.reply_text(msg, parse_mode='HTML')
 
 # Scansione e Monitoraggio Live
 async def esegui_scansione_e_monitoraggio(app_bot):
@@ -380,10 +421,9 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if p_curr > sma200: score += 8
             else: score -= 12
 
-            # Ponderazione Macro Factor Integrata
             emi = calcola_macro_impact(ticker, fattori)
             score += int(emi * 0.25)
-            macro_tag = f" [🌐 Macro: {emi:+.0f}%]" if abs(emi) >= 12.0 else ""
+            macro_tag = f" [🌐 Macro: {emi:+.0f}%]" if abs(emi) >= 8.0 else ""
 
             score = int(np.clip(score, 0, 100))
 
@@ -422,60 +462,6 @@ async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
 
-# COMANDO OUTLOOK SCIENTIFICO: LONG & SHORT SETTORIALI
-async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🌐 Scansione vettori geopolitici e matrice fattoriale in corso...")
-    desc_sentiment, settore_fav, fattori, news, rilevanze = analizza_notizie_macro()
-
-    impatti = []
-    for ticker, info in PANIERE.items():
-        if info['settore'] in ['cash', 'etf']: continue
-        emi = calcola_macro_impact(ticker, fattori)
-        impatti.append({
-            "ticker": ticker,
-            "nome": info["nome"],
-            "settore": info["settore"],
-            "emi": emi
-        })
-
-    impatti.sort(key=lambda x: x["emi"], reverse=True)
-    rialzisti = [item for item in impatti if item["emi"] >= 15.0][:3]
-    ribassisti = [item for item in impatti if item["emi"] <= -15.0][:3]
-
-    msg = (
-        f"🧭 <b>MACRO FACTOR INTELLIGENCE & SCENARIO</b>\n\n"
-        f"📊 <b>Regime Globale:</b>\n<b>{desc_sentiment}</b>\n\n"
-        f"⚙️ <b>Vettori di Rischio Rilevati:</b>\n"
-        f"• Commercio/Dazi: <code>{fattori['dazi']:+.2f}σ</code>\n"
-        f"• Tassi/Politica Monetaria: <code>{fattori['tassi']:+.2f}σ</code>\n"
-        f"• Tensione Geopolitica: <code>{fattori['geopolitica']:+.2f}σ</code>\n"
-        f"• Rischio Debito/Spread: <code>{fattori['debito']:+.2f}σ</code>\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🟢 <b>POTENZIALE RIALZISTA (Vento a Favore Macro):</b>\n"
-    )
-
-    if rialzisti:
-        for item in rialzisti:
-            msg += f"• 🔥 <b>{item['nome']}</b> (<code>{item['ticker']}</code>) ➔ Impatto: <b>{item['emi']:+.1f}%</b>\n"
-    else:
-        msg += "• <i>Nessun titolo evidenzia al momento forte spinta rialzista unidirezionale.</i>\n"
-
-    msg += f"\n🔴 <b>RISCHIO RIBASSO (Pressione Macro Avversa):</b>\n"
-    if ribassisti:
-        for item in ribassisti:
-            msg += f"• ⚠️ <b>{item['nome']}</b> (<code>{item['ticker']}</code>) ➔ Impatto: <b>{item['emi']:+.1f}%</b>\n"
-    else:
-        msg += "• <i>Nessun titolo presenta al momento forti pressioni di ribasso macro.</i>\n"
-
-    if rilevanze:
-        msg += "\n━━━━━━━━━━━━━━━━━━━━\n🗳️ <b>Eventi Rilevanti Monitorati:</b>\n"
-        for r in rilevanze[:2]:
-            msg += f"📌 <i>{r}</i>\n"
-
-    msg += "\n💡 <i>I vettori fattoriali stimano l'impatto economico a 5-10 sedute.</i>"
-    await update.message.reply_text(msg, parse_mode='HTML')
-
-# Comandi Gestione Portafoglio
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
@@ -522,7 +508,7 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         prezzo_vendita = float(args[1].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Prezzo di vendita non valido.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Prezzo non valido.", parse_mode='HTML')
         return
 
     portafoglio = carica_portafoglio()
@@ -597,12 +583,12 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         segno = "🟢" if rend_attuale >= 0 else "🔴"
 
         emi = calcola_macro_impact(t, fattori)
-        if emi >= 15.0:
-            impatto_macro = f"🟢 VENTO A FAVORE ({emi:+.0f}%)"
-        elif emi <= -15.0:
-            impatto_macro = f"🔴 PRESSIONE CONTRARIA ({emi:+.0f}%)"
+        if emi >= 8.0:
+            impatto_macro = f"🟢 VENTO A FAVORE ({emi:+.1f}%)"
+        elif emi <= -8.0:
+            impatto_macro = f"🔴 PRESSIONE CONTRARIA ({emi:+.1f}%)"
         else:
-            impatto_macro = f"⚪ NEUTRO/BILANCIATO ({emi:+.0f}%)"
+            impatto_macro = f"⚪ NEUTRO/BILANCIATO ({emi:+.1f}%)"
 
         msg += (
             f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
@@ -685,7 +671,6 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(testo, parse_mode='HTML')
 
-# Moduli Quant Tennis & Basket
 def prob_game_servizio(p):
     if p >= 1.0: return 1.0
     if p <= 0.0: return 0.0
@@ -771,7 +756,6 @@ async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# Callback Bottoni
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -886,7 +870,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram avviato con Matrice Fattoriale Macro in Outlook e Scan...")
+    print("🤖 Bot Telegram operativo con ranking dinamico Long/Short in Outlook...")
     app.run_polling()
 
 if __name__ == "__main__":
