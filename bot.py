@@ -36,7 +36,7 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 
 POSIZIONI_PREDEFINITE = {}
 
-# PANIERE CON CATEGORIZZAZIONE SETTORIALE PER IL MODULO MACRO
+# PANIERE STRUTTURATO PER SETTORE (COLLEGATO AL MODULO NOTIZIE/MACRO)
 PANIERE = {
     # Ciclici, Industriali & Export (sensibili a dazi, commercio USA, distensione)
     "STLAM.MI": {"nome": "Stellantis", "settore": "export"},
@@ -45,14 +45,14 @@ PANIERE = {
     "SAL.MI": {"nome": "Webuild", "settore": "export"},
     "SFER.MI": {"nome": "Salvatore Ferragamo", "settore": "export"},
 
-    # Finanziari & Bancari (sensibili a spread e tassi)
+    # Finanziari & Bancari (sensibili a spread BTP-Bund e tassi)
     "ISP.MI": {"nome": "Intesa Sanpaolo", "settore": "finanza"},
     "UCG.MI": {"nome": "UniCredit", "settore": "finanza"},
     "BPE.MI": {"nome": "BPER Banca", "settore": "finanza"},
     "BMED.MI": {"nome": "Banca Mediolanum", "settore": "finanza"},
     "G.MI": {"nome": "Generali", "settore": "finanza"},
 
-    # Difensivi & Utility (bene con cautela, mercati incerti e dividendi)
+    # Difensivi & Utility (bene con incertezza di mercato, tassi alti o cedole)
     "ENEL.MI": {"nome": "Enel", "settore": "utility"},
     "TRN.MI": {"nome": "Terna", "settore": "utility"},
     "SRG.MI": {"nome": "Snam", "settore": "utility"},
@@ -85,6 +85,7 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
+# Gestione Persistenza Dati
 def carica_portafoglio():
     if os.path.exists(PORTFOLIO_FILE):
         try:
@@ -133,6 +134,7 @@ def registra_chiusura_operazione(ticker, nome, quote, pmc, p_uscita, motivo="Ven
     salva_storico(storico)
     return operazione
 
+# Analisi Tecnica e Quantitativa
 def calcola_atr(df, period=14):
     high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
     low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
@@ -158,8 +160,9 @@ def verifica_regime_ftsemib():
     except Exception:
         return True, 0.0
 
+# Motore News & Intelligence Geopolitica
 def analizza_notizie_macro():
-    """Analizza i feed RSS macro/geopolitici per determinare il sentiment e i settori favoriti"""
+    """Scansiona notizie macro e geopolitiche determinando il sentiment di mercato"""
     feed_urls = [
         "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
         "https://news.google.com/rss/search?q=elezioni+USA+Wall+Street+tassi+BCE+FED&hl=it&gl=IT&ceid=IT:it"
@@ -206,10 +209,11 @@ def analizza_notizie_macro():
 
     return sentiment, settore_favorito, desc_sentiment, notizie[:4], rilevanze
 
+# Scansione e Monitoraggio Live
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Monitoraggio posizioni aperte (Target ATR)
+    # 1. Alert su Take Profit / Stop Loss delle posizioni aperte
     for ticker, info in list(portafoglio.items()):
         try:
             d = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -244,12 +248,12 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception as e:
             logging.error(f"Errore monitoraggio {ticker}: {e}")
 
-    # 2. Modulo Macro & Regime FTSE MIB
+    # 2. Clima Macro & Regime FTSE MIB
     sentiment, settore_fav, desc_sentiment, news, _ = analizza_notizie_macro()
     indice_rialzista, _ = verifica_regime_ftsemib()
     regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
-    # 3. Scansione Paniere con Ponderazione Notizie/Macro
+    # 3. Classifica Top 10 con Ponderazione Settoriale
     risultati = []
     for ticker, meta in PANIERE.items():
         if ticker in portafoglio:
@@ -301,9 +305,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if p_curr > sma200: score += 8
             else: score -= 12
 
-            # ==========================================================
-            # PONDERAZIONE MACRO / NOTIZIE GEOPOLITICHE
-            # ==========================================================
+            # Ponderazione Macro Notizie
             macro_tag = ""
             if sentiment == "BULLISH" and settore == "export":
                 score += 10
@@ -314,7 +316,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             elif sentiment == "BEARISH" and settore == "export":
                 score -= 8
                 macro_tag = " [⚠️ Rischio Dazi]"
-            # ==========================================================
 
             score = int(np.clip(score, 0, 100))
 
@@ -352,6 +353,7 @@ async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
 
+# Comandi Operativi
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
@@ -365,7 +367,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         quote = int(args[1])
         pmc = float(args[2].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Valori non validi.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Valori numerici non validi.", parse_mode='HTML')
         return
 
     nome = PANIERE.get(ticker, {}).get("nome", ticker)
@@ -382,7 +384,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>ACQUISTO REGISTRATO!</b>\n\n"
         f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
         f"• Quantità: <code>{quote} quote</code> | PMC: <code>€{pmc:.3f}</code>\n"
-        f"• Controvalore: <code>€{quote * pmc:.2f}</code>",
+        f"• Controvalore totale: <code>€{quote * pmc:.2f}</code>",
         parse_mode='HTML'
     )
 
@@ -398,7 +400,7 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         prezzo_vendita = float(args[1].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Prezzo non valido.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Prezzo di vendita non valido.", parse_mode='HTML')
         return
 
     portafoglio = carica_portafoglio()
@@ -430,12 +432,19 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Visualizza il portafoglio arricchito con l'impatto delle notizie macro sul singolo titolo"""
     portafoglio = carica_portafoglio()
     if not portafoglio:
         await update.message.reply_text("💼 Nessun titolo attualmente attivo nel portafoglio.")
         return
 
-    msg = "💼 <b>PORTAFOGLIO ATTIVO & PERFORMANCE LIVE</b>\n\n"
+    # Lettura notizie e sentiment macro
+    sentiment, settore_fav, desc_sentiment, news, _ = analizza_notizie_macro()
+
+    msg = (
+        f"💼 <b>PORTAFOGLIO ATTIVO & PERFORMANCE LIVE</b>\n"
+        f"🧭 <i>Clima Macro Globale: {desc_sentiment}</i>\n\n"
+    )
     totale_investito = 0.0
     totale_attuale = 0.0
 
@@ -465,13 +474,29 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rend_attuale = ((p_live - pmc) / pmc) * 100
         tp_prezzo = pmc + (2.0 * atr_val)
         sl_prezzo = pmc - (1.5 * atr_val)
+        manca_tp = ((tp_prezzo - p_live) / p_live) * 100
+        margine_sl = ((p_live - sl_prezzo) / p_live) * 100
         segno = "🟢" if rend_attuale >= 0 else "🔴"
+
+        # Valutazione Impatto Notizie sul singolo titolo posseduto
+        settore = PANIERE.get(t, {}).get("settore", "generico")
+        impatto_macro = "⚪ Neutro / Tecnico"
+        if sentiment == "BULLISH" and settore == "export":
+            impatto_macro = "🟢 VENTO A FAVORE (Spinta Export / USA)"
+        elif sentiment == "BEARISH" and settore == "utility":
+            impatto_macro = "🛡️ PROTETTO (Flusso Difensivo / Cedola)"
+        elif sentiment == "BEARISH" and settore == "export":
+            impatto_macro = "⚠️ ATTENZIONE (Pressione Dazi / Ciclo Debole)"
+        elif sentiment == "BULLISH" and settore == "finanza":
+            impatto_macro = "🟢 FAVOREVOLE (Propensione al rischio / Spread stabile)"
 
         msg += (
             f"🔹 <b>{info['nome']}</b> (<code>{t}</code>)\n"
             f"• Quote: <code>{quote}</code> | Investito: <code>€{val_carico:.2f}</code> ➔ Attuale: <code>€{val_live:.2f}</code>\n"
             f"• PMC: <code>€{pmc:.3f}</code> ➔ Prezzo: <code>€{p_live:.3f}</code> ({segno} <b>{rend_attuale:+.2f}%</b>)\n"
-            f"• 🎯 Target (+2 ATR): <code>€{tp_prezzo:.3f}</code> | ⚠️ Stop (-1.5 ATR): <code>€{sl_prezzo:.3f}</code>\n"
+            f"• 🎯 Target (+2 ATR): <code>€{tp_prezzo:.3f}</code> (distanza: <b>{manca_tp:+.2f}%</b>)\n"
+            f"• ⚠️ Stop (-1.5 ATR): <code>€{sl_prezzo:.3f}</code> (margine: <b>{margine_sl:.2f}%</b>)\n"
+            f"• 🌐 <b>Impatto Notizie:</b> <code>{impatto_macro}</code>\n"
             f"────────────────────\n"
         )
 
@@ -500,9 +525,10 @@ async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"📜 <b>STORICO OPERAZIONI CONSOLIDATE</b>\n\n"
-        f"• Concluse: <b>{len(storico)}</b> | Win Rate: <b>{win_rate:.1f}%</b> (✅ {len(vinte)} | ❌ {len(perse)})\n"
-        f"• P&L Netto Totale: <b>€{tot_pnl:+.2f}</b>\n\n"
-        f"<b>Ultime posizioni:</b>\n"
+        f"• Operazioni Chiuse: <b>{len(storico)}</b>\n"
+        f"• Win Rate: <b>{win_rate:.1f}%</b> (✅ {len(vinte)} | ❌ {len(perse)})\n"
+        f"• P&L Netto Realizzato: <b>€{tot_pnl:+.2f}</b>\n\n"
+        f"<b>Ultime chiusure:</b>\n"
     )
     for op in storico[-5:]:
         icona = "🟢" if op['pnl_euro'] >= 0 else "🔴"
@@ -518,9 +544,9 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         f"🧭 <b>RADAR PREVISIONALE & MACRO INTELLIGENCE</b>\n\n"
-        f"📊 <b>Sentiment:</b> <b>{desc_sentiment}</b>\n"
+        f"📊 <b>Sentiment Globale:</b> <b>{desc_sentiment}</b>\n"
         f"🎯 <b>Settore Favorito:</b> <code>{settore_fav.upper()}</code>\n\n"
-        f"🔍 <b>Notizie Finanziarie Chiave:</b>\n"
+        f"🔍 <b>Notizie Finanziarie Rilevate:</b>\n"
     )
     for n in news[:4]: msg += f"• <i>{n}</i>\n"
 
@@ -531,7 +557,7 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Scansione quantitativa e ponderazione macro in corso...")
+    await update.message.reply_text("🔍 Scansione quantitativa con ponderazione macro in corso...")
     await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -540,7 +566,7 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
         res = requests.get(url, timeout=10).json()
         closes = [float(c["c"]) for c in res["result"]["data"]]
     except Exception:
-        await update.message.reply_text("⚠️ Errore Crypto.com.")
+        await update.message.reply_text("⚠️ Errore connessione Crypto.com.")
         return
 
     p_live = closes[-1]
@@ -563,7 +589,7 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(testo, parse_mode='HTML')
 
-# Moduli Tennis & Basket
+# Moduli Quant Tennis & Basket
 def prob_game_servizio(p):
     if p >= 1.0: return 1.0
     if p <= 0.0: return 0.0
@@ -649,7 +675,7 @@ async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# Callback Bottoni Telegram
+# Callback Bottoni Interattivi
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -764,7 +790,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram avviato con News Intelligence integrata nelle Top 10...")
+    print("🤖 Bot Telegram avviato con News Intelligence integrata nelle Top 10 e nel Portafoglio...")
     app.run_polling()
 
 if __name__ == "__main__":
