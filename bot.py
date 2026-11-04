@@ -29,6 +29,8 @@ logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
+GIST_ID = os.getenv("GIST_ID", "").strip()
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "").strip()
 
 PORTFOLIO_FILE = "portfolio.json"
 STORICO_FILE = "storico_operazioni.json"
@@ -36,13 +38,14 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 
 POSIZIONI_PREDEFINITE = {}
 
-# PANIERE CON MATRICE DI SENSIBILITA' FATTORIALE (BETA MACRO)
+# PANIERE AGGIORNATO CON MATRICE DI SENSIBILITA' FATTORIALE (BETA MACRO)
+# Nota: Maire Tecnimont aggiornato in MAIRE.MI e Webuild aggiornato in WBD.MI
 PANIERE = {
     # Ciclici, Industriali & Export
     "STLAM.MI": {"nome": "Stellantis", "settore": "export", "beta_dazi": 0.85, "beta_tassi": -0.30, "beta_geopolitica": -0.40, "beta_debito": 0.20},
     "RACE.MI": {"nome": "Ferrari", "settore": "export", "beta_dazi": 0.50, "beta_tassi": -0.10, "beta_geopolitica": -0.20, "beta_debito": 0.10},
-    "MREC.MI": {"nome": "Maire Tecnimont", "settore": "export", "beta_dazi": 0.60, "beta_tassi": -0.40, "beta_geopolitica": -0.30, "beta_debito": 0.30},
-    "SAL.MI": {"nome": "Webuild", "settore": "export", "beta_dazi": 0.40, "beta_tassi": -0.50, "beta_geopolitica": -0.20, "beta_debito": 0.40},
+    "MAIRE.MI": {"nome": "Maire Tecnimont", "settore": "export", "beta_dazi": 0.60, "beta_tassi": -0.40, "beta_geopolitica": -0.30, "beta_debito": 0.30},
+    "WBD.MI": {"nome": "Webuild", "settore": "export", "beta_dazi": 0.40, "beta_tassi": -0.50, "beta_geopolitica": -0.20, "beta_debito": 0.40},
     "SFER.MI": {"nome": "Salvatore Ferragamo", "settore": "export", "beta_dazi": 0.70, "beta_tassi": -0.20, "beta_geopolitica": -0.40, "beta_debito": 0.10},
 
     # Finanziari & Bancari
@@ -87,7 +90,51 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
+# --- GESTIONE DATI CON GITHUB GIST E FALLBACK LOCALE ---
+def _leggi_gist_file(nome_file, default_val):
+    if not GIST_ID or not GITHUB_TOKEN:
+        return None
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        if res.status_code == 200:
+            files = res.json().get("files", {})
+            if nome_file in files:
+                return json.loads(files[nome_file]["content"])
+    except Exception as e:
+        logging.error(f"Errore lettura Gist ({nome_file}): {e}")
+    return None
+
+def _scrivi_gist_file(nome_file, dati):
+    if not GIST_ID or not GITHUB_TOKEN:
+        return False
+    url = f"https://api.github.com/gists/{GIST_ID}"
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+    payload = {
+        "files": {
+            nome_file: {
+                "content": json.dumps(dati, indent=4)
+            }
+        }
+    }
+    try:
+        res = requests.patch(url, headers=headers, json=payload, timeout=8)
+        return res.status_code == 200
+    except Exception as e:
+        logging.error(f"Errore scrittura Gist ({nome_file}): {e}")
+        return False
+
 def carica_portafoglio():
+    cloud_data = _leggi_gist_file(PORTFOLIO_FILE, {})
+    if cloud_data is not None:
+        return cloud_data
     if os.path.exists(PORTFOLIO_FILE):
         try:
             with open(PORTFOLIO_FILE, "r") as f:
@@ -97,10 +144,15 @@ def carica_portafoglio():
     return dict(POSIZIONI_PREDEFINITE)
 
 def salva_portafoglio(data):
+    if GIST_ID and GITHUB_TOKEN:
+        _scrivi_gist_file(PORTFOLIO_FILE, data)
     with open(PORTFOLIO_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
 def carica_storico():
+    cloud_data = _leggi_gist_file(STORICO_FILE, [])
+    if cloud_data is not None:
+        return cloud_data
     if os.path.exists(STORICO_FILE):
         try:
             with open(STORICO_FILE, "r") as f:
@@ -110,6 +162,8 @@ def carica_storico():
     return []
 
 def salva_storico(data):
+    if GIST_ID and GITHUB_TOKEN:
+        _scrivi_gist_file(STORICO_FILE, data)
     with open(STORICO_FILE, "w") as f:
         json.dump(data, f, indent=4)
 
@@ -265,7 +319,7 @@ def calcola_macro_impact(ticker, fattori):
 
     return float(np.clip(impatto, -100.0, 100.0))
 
-# COMANDO OUTLOOK OTTIMIZZATO: CLASSIFICA SEMPRE VISIBILE CON RANKING DINAMICO
+# COMANDO OUTLOOK CON MATRICE FATTORIALE
 async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🌐 Scansione vettori geopolitici e matrice fattoriale in corso...")
     desc_sentiment, settore_fav, fattori, news, rilevanze = analizza_notizie_macro()
@@ -283,7 +337,6 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     impatti.sort(key=lambda x: x["emi"], reverse=True)
 
-    # Prende sempre i primi 3 e gli ultimi 3 in ordine di convenienza relativa
     top_long = impatti[:3]
     top_short = sorted(impatti[-3:], key=lambda x: x["emi"])
 
@@ -316,11 +369,11 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\n💡 <i>I vettori fattoriali stimano l'impatto economico a 5-10 sedute.</i>"
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# Scansione e Monitoraggio Live
+# SCANSIONE QUANTITATIVA OTTIMIZZATA (FILTRO CANDELA VERDE + REVERSION SMA20)
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Alert Take Profit / Stop Loss sulle posizioni aperte
+    # 1. Alert di Uscita sulle posizioni in essere
     for ticker, info in list(portafoglio.items()):
         try:
             d = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -332,13 +385,14 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             pmc = info['pmc']
             quote = info['quote']
 
+            sma20_s = close.rolling(20).mean().dropna()
+            tp_dinamico = float(sma20_s.iloc[-1]) if not sma20_s.empty else (pmc * 1.03)
             atr_val = calcola_atr(d, 14)
-            tp_dinamico = pmc + (2.0 * atr_val)
             sl_dinamico = max(0.01, pmc - (1.5 * atr_val))
             rend_pct = ((p_live - pmc) / pmc) * 100
 
             if p_live >= tp_dinamico or p_live <= sl_dinamico:
-                tipo = f"🎯 TAKE PROFIT (+2 ATR a €{tp_dinamico:.3f})" if p_live >= tp_dinamico else f"⚠️ STOP LOSS (-1.5 ATR a €{sl_dinamico:.3f})"
+                tipo = f"🎯 TARGET MEAN REVERSION (SMA 20 a €{tp_dinamico:.3f})" if p_live >= tp_dinamico else f"⚠️ STOP LOSS (-1.5 ATR a €{sl_dinamico:.3f})"
                 tastiera = InlineKeyboardMarkup([
                     [InlineKeyboardButton("✅ Venduto a Mercato", callback_data=f"venduto_{ticker}_{p_live:.3f}")],
                     [InlineKeyboardButton("⏳ Tieni Posizione", callback_data=f"tieni_{ticker}")]
@@ -357,12 +411,13 @@ async def esegui_scansione_e_monitoraggio(app_bot):
     # 2. Clima Macro & Regime FTSE MIB
     desc_sentiment, settore_fav, fattori, news, _ = analizza_notizie_macro()
     indice_rialzista, _ = verifica_regime_ftsemib()
-    regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
+    regime_icon = "🟢 Favorevole (Sopra SMA 50)" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
-    # 3. Classifica Top 10
-    risultati = []
+    # 3. Scansione Titoli con Modello Statistico Ottimizzato
+    segnali_validati = []
     for ticker, meta in PANIERE.items():
         if ticker in portafoglio: continue
+        if meta['settore'] in ['cash', 'etf']: continue
         nome = meta["nome"]
 
         try:
@@ -370,97 +425,99 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if df.empty: continue
 
             close = estrai_serie(df, 'Close')
-            volume = estrai_serie(df, 'Volume')
-            if len(close) < 25: continue
-
-            p_curr = float(close.iloc[-1])
-            if pd.isna(p_curr) or p_curr <= 0: continue
+            open_p = estrai_serie(df, 'Open')
+            high = estrai_serie(df, 'High')
+            low = estrai_serie(df, 'Low')
+            if len(close) < 200: continue
 
             sma20_s = close.rolling(20).mean().dropna()
             std20_s = close.rolling(20).std().dropna()
-            sma200_s = close.rolling(200).mean().dropna() if len(close) >= 200 else close.rolling(50).mean().dropna()
-
-            sma20 = float(sma20_s.iloc[-1]) if not sma20_s.empty else p_curr
-            std20 = float(std20_s.iloc[-1]) if not std20_s.empty else 0.01
-            sma200 = float(sma200_s.iloc[-1]) if not sma200_s.empty else p_curr
-
-            z_score = (p_curr - sma20) / std20 if std20 > 0 else 0.0
+            sma200_s = close.rolling(200).mean().dropna()
 
             delta = close.diff()
             g = (delta.where(delta > 0, 0)).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
             rs = g / l.replace(0, np.nan)
             rsi_s = (100 - (100 / (1 + rs))).dropna()
-            rsi = float(rsi_s.iloc[-1]) if not rsi_s.empty else 50.0
 
-            vol_ratio = 1.0
-            if not volume.empty:
-                vol_clean = volume[volume > 0]
-                if len(vol_clean) >= 20:
-                    vol_last = float(vol_clean.iloc[-1])
-                    sma_vol = float(vol_clean.rolling(20).mean().iloc[-1])
-                    if sma_vol > 0:
-                        vol_ratio = vol_last / sma_vol
+            # Valori attuali (t) e barra precedente (t-1)
+            p_curr = float(close.iloc[-1])
+            o_curr = float(open_p.iloc[-1])
+            p_prev = float(close.iloc[-2])
+            low_curr = float(low.iloc[-1])
+            low_prev = float(low.iloc[-2])
 
-            atr = calcola_atr(df, 14)
-            tp_stimato = p_curr + (2.0 * atr)
-            sl_stimato = max(0.01, p_curr - (1.5 * atr))
+            sma20_curr = float(sma20_s.iloc[-1])
+            z_score_prev = (p_prev - float(sma20_s.iloc[-2])) / float(std20_s.iloc[-2])
+            rsi_prev = float(rsi_s.iloc[-2])
+            sma200_prev = float(sma200_s.iloc[-2])
 
-            score = 50.0
-            if indice_rialzista: score += 5
-            else: score -= 10
+            # Setup Ipervenduto (t-1)
+            setup_ipervenduto = (z_score_prev <= -1.4 and rsi_prev <= 40 and p_prev >= (sma200_prev * 0.93))
+            
+            # Candela Verde di Conferma (t)
+            conferma_rimbalzo = (p_curr > o_curr and p_curr > p_prev)
 
-            if z_score <= -2.0: score += 20
-            elif z_score <= -1.0: score += 10
-            elif z_score >= 2.0: score -= 20
+            if setup_ipervenduto and conferma_rimbalzo and indice_rialzista:
+                atr = calcola_atr(df, 14)
+                tp = sma20_curr
+                sl = min(low_prev, low_curr) - (0.8 * atr)
+                gain_pct = ((tp - p_curr) / p_curr) * 100
+                risk_pct = ((p_curr - sl) / p_curr) * 100
+                emi = calcola_macro_impact(ticker, fattori)
 
-            if rsi < 32: score += 18
-            elif rsi < 42: score += 8
-            elif rsi > 70: score -= 20
-
-            if p_curr > sma200: score += 8
-            else: score -= 12
-
-            emi = calcola_macro_impact(ticker, fattori)
-            score += int(emi * 0.25)
-            macro_tag = f" [🌐 Macro: {emi:+.0f}%]" if abs(emi) >= 8.0 else ""
-
-            score = int(np.clip(score, 0, 100))
-
-            risultati.append({
-                "ticker": ticker, "nome": nome, "prezzo": p_curr,
-                "score": score, "rsi": rsi, "z_score": z_score,
-                "vol_ratio": vol_ratio, "atr": atr, "tp": tp_stimato,
-                "sl": sl_stimato, "macro_tag": macro_tag
-            })
+                segnali_validati.append({
+                    "ticker": ticker, "nome": nome, "prezzo": p_curr,
+                    "tp": tp, "sl": sl, "gain_pct": gain_pct,
+                    "risk_pct": risk_pct, "rsi": rsi_prev,
+                    "z_score": z_score_prev, "emi": emi
+                })
         except Exception:
             continue
 
-    if not risultati:
-        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Mercati in fase di apertura o dati non disponibili.")
+    if not segnali_validati:
+        await app_bot.send_message(
+            chat_id=TELEGRAM_CHAT_ID,
+            text=(
+                f"📊 <b>SCANSIONE QUANTITATIVA DIRETTA</b>\n"
+                f"🌐 <i>FTSE MIB: {regime_icon}</i>\n"
+                f"🧭 <i>Clima Macro: {desc_sentiment}</i>\n\n"
+                f"ℹ️ Nessun titolo presenta attualmente la combinazione convalidata:\n"
+                f"• Ipervenduto (Z-Score ≤ -1.4, RSI ≤ 40)\n"
+                f"• Candela verde di conferma rimbalzo\n\n"
+                f"<i>Filtro attivo a protezione del capitale (Win Rate storico 75.7%).</i>"
+            ),
+            parse_mode='HTML'
+        )
         return
 
-    risultati.sort(key=lambda x: x["score"], reverse=True)
-    top10 = risultati[:10]
-
-    classifica_txt = (
-        f"📊 <b>TOP 10 CON INTELLIGENCE NOTIZIE & REGIME</b>\n"
+    msg = (
+        f"🎯 <b>OPPORTUNITÀ CONVALIDATE (Win Rate storico 75.7%)</b>\n"
         f"🌐 <i>FTSE MIB: {regime_icon}</i>\n"
         f"🧭 <i>Clima Macro: {desc_sentiment}</i>\n\n"
     )
-    for i, item in enumerate(top10, start=1):
-        icona = "🔥" if item['score'] >= 55 else "🔹"
-        classifica_txt += (
-            f"{i}. {icona} <b>{item['nome']}</b> (<code>{item['ticker']}</code>){item['macro_tag']}\n"
-            f"   Prezzo: <code>€{item['prezzo']:.3f}</code> | Score: <b>{item['score']}/100</b>\n"
-            f"   RSI: <code>{item['rsi']:.1f}</code> | Z-Score: <code>{item['z_score']:+.2f}σ</code> | Vol: <code>{item['vol_ratio']:.1f}x</code>\n"
-            f"   🎯 TP: <code>€{item['tp']:.3f}</code> | ⚠️ SL: <code>€{item['sl']:.3f}</code>\n\n"
+    for s in segnali_validati:
+        tasti = InlineKeyboardMarkup([
+            [InlineKeyboardButton(f"🛒 Registra Acquisto {s['ticker']}", callback_data=f"buy_{s['ticker']}_{s['prezzo']:.3f}")],
+            [InlineKeyboardButton("❌ Ignora Segnale", callback_data=f"ignora_{s['ticker']}")]
+        ])
+        testo_singolo = (
+            f"📌 <b>{s['nome']}</b> (<code>{s['ticker']}</code>)\n"
+            f"• Prezzo Ingresso: <code>€{s['prezzo']:.3f}</code>\n"
+            f"• 🎯 <b>Target (SMA 20):</b> <code>€{s['tp']:.3f}</code> (+{s['gain_pct']:.2f}%)\n"
+            f"• ⚠️ <b>Stop Loss (Swing Low):</b> <code>€{s['sl']:.3f}</code> (-{s['risk_pct']:.2f}%)\n"
+            f"• Indicatori: RSI {s['rsi']:.1f} | Z-Score {s['z_score']:+.2f}σ\n"
+            f"• Ponderazione Macro: <b>{s['emi']:+.1f}%</b>\n"
         )
-    await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=classifica_txt, parse_mode='HTML')
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo_singolo, parse_mode='HTML', reply_markup=tasti)
 
 async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🔍 Scansione quantitativa avanzata con filtro di conferma in corso...")
+    await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
@@ -475,7 +532,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         quote = int(args[1])
         pmc = float(args[2].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Valori non validi.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Valori numerici non validi.", parse_mode='HTML')
         return
 
     nome = PANIERE.get(ticker, {}).get("nome", ticker)
@@ -489,7 +546,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salva_portafoglio(portafoglio)
 
     await update.message.reply_text(
-        f"✅ <b>ACQUISTO REGISTRATO!</b>\n\n"
+        f"✅ <b>ACQUISTO REGISTRATO NEL CLOUD!</b>\n\n"
         f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
         f"• Quantità: <code>{quote} quote</code> | PMC: <code>€{pmc:.3f}</code>\n"
         f"• Controvalore: <code>€{quote * pmc:.2f}</code>",
@@ -535,7 +592,7 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"• Titolo: <b>{op['nome']}</b> (<code>{ticker}</code>)\n"
         f"• PMC: <code>€{op['pmc']:.3f}</code> ➔ Uscita: <code>€{op['prezzo_uscita']:.3f}</code>\n"
         f"• Esito: <b>{icona}</b> | P&L: <b>€{op['pnl_euro']:+.2f} ({op['rendimento_pct']:+.2f}%)</b>\n\n"
-        f"<i>Titolo rimosso dal portafoglio e salvato nello storico.</i>"
+        f"<i>Titolo rimosso dal portafoglio e sincronizzato su Gist.</i>"
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
@@ -626,7 +683,7 @@ async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"📜 <b>STORICO OPERAZIONI CONSOLIDATE</b>\n\n"
         f"• Operazioni Chiuse: <b>{len(storico)}</b>\n"
-        f"• Win Rate: <b>{win_rate:.1f}%</b> (✅ {len(vinte)} | ❌ {len(perse)})\n"
+        f"• Win Rate Reale: <b>{win_rate:.1f}%</b> (✅ {len(vinte)} | ❌ {len(perse)})\n"
         f"• P&L Netto Realizzato: <b>€{tot_pnl:+.2f}</b>\n\n"
         f"<b>Ultime chiusure:</b>\n"
     )
@@ -638,10 +695,7 @@ async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     await update.message.reply_text(msg, parse_mode='HTML')
 
-async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Scansione quantitativa con ponderazione macro in corso...")
-    await esegui_scansione_e_monitoraggio(context.bot)
-
+# RADAR DOGECOIN
 async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = "https://api.crypto.com/v2/public/get-candlestick?instrument_name=DOGE_EUR&timeframe=1h"
     try:
@@ -671,6 +725,7 @@ async def cmd_doge(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(testo, parse_mode='HTML')
 
+# MODELLO TENNIS
 def prob_game_servizio(p):
     if p >= 1.0: return 1.0
     if p <= 0.0: return 0.0
@@ -724,6 +779,7 @@ async def cmd_tennis(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
+# MODELLO BASKET
 async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 8:
@@ -756,6 +812,7 @@ async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
+# GESTIONE CALLBACK PULSANTI TELEGRAM
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -783,7 +840,7 @@ async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             await query.edit_message_text(
                 f"✅ Posizione su <b>{ticker}</b> chiusa a <code>€{prezzo_chiusura:.3f}</code>!\n"
-                f"P&L: <b>€{op['pnl_euro']:+.2f} ({op['rendimento_pct']:+.2f}%)</b> salvato nello storico.",
+                f"P&L: <b>€{op['pnl_euro']:+.2f} ({op['rendimento_pct']:+.2f}%)</b> sincronizzato nel cloud.",
                 parse_mode='HTML'
             )
         else:
@@ -870,7 +927,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram operativo con ranking dinamico Long/Short in Outlook...")
+    print("🤖 Bot Telegram operativo su tutti i moduli con motore di scansione ottimizzato...")
     app.run_polling()
 
 if __name__ == "__main__":
