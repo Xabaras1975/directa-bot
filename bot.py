@@ -36,23 +36,23 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 
 POSIZIONI_PREDEFINITE = {}
 
-# PANIERE STRUTTURATO PER SETTORE (COLLEGATO AL MODULO NOTIZIE/MACRO)
+# PANIERE STRUTTURATO PER SETTORE
 PANIERE = {
-    # Ciclici, Industriali & Export (sensibili a dazi, commercio USA, distensione)
+    # Ciclici, Industriali & Export
     "STLAM.MI": {"nome": "Stellantis", "settore": "export"},
     "RACE.MI": {"nome": "Ferrari", "settore": "export"},
     "MREC.MI": {"nome": "Maire Tecnimont", "settore": "export"},
     "SAL.MI": {"nome": "Webuild", "settore": "export"},
     "SFER.MI": {"nome": "Salvatore Ferragamo", "settore": "export"},
 
-    # Finanziari & Bancari (sensibili a spread BTP-Bund e tassi)
+    # Finanziari & Bancari
     "ISP.MI": {"nome": "Intesa Sanpaolo", "settore": "finanza"},
     "UCG.MI": {"nome": "UniCredit", "settore": "finanza"},
     "BPE.MI": {"nome": "BPER Banca", "settore": "finanza"},
     "BMED.MI": {"nome": "Banca Mediolanum", "settore": "finanza"},
     "G.MI": {"nome": "Generali", "settore": "finanza"},
 
-    # Difensivi & Utility (bene con incertezza di mercato, tassi alti o cedole)
+    # Difensivi & Utility
     "ENEL.MI": {"nome": "Enel", "settore": "utility"},
     "TRN.MI": {"nome": "Terna", "settore": "utility"},
     "SRG.MI": {"nome": "Snam", "settore": "utility"},
@@ -85,7 +85,6 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
-# Gestione Persistenza Dati
 def carica_portafoglio():
     if os.path.exists(PORTFOLIO_FILE):
         try:
@@ -134,17 +133,31 @@ def registra_chiusura_operazione(ticker, nome, quote, pmc, p_uscita, motivo="Ven
     salva_storico(storico)
     return operazione
 
-# Analisi Tecnica e Quantitativa
+def estrai_serie(df, col_nome):
+    if col_nome not in df.columns:
+        return pd.Series(dtype=float)
+    col = df[col_nome]
+    if isinstance(col, pd.DataFrame):
+        col = col.iloc[:, 0]
+    return col.dropna()
+
 def calcola_atr(df, period=14):
-    high = df['High'].iloc[:, 0] if isinstance(df['High'], pd.DataFrame) else df['High']
-    low = df['Low'].iloc[:, 0] if isinstance(df['Low'], pd.DataFrame) else df['Low']
-    close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
+    high = estrai_serie(df, 'High')
+    low = estrai_serie(df, 'Low')
+    close = estrai_serie(df, 'Close')
+    
+    if len(close) < period + 1:
+        return float(close.iloc[-1] * 0.02) if not close.empty else 0.05
+    
     prev_close = close.shift(1)
     tr1 = high - low
     tr2 = (high - prev_close).abs()
     tr3 = (low - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(period).mean()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1).dropna()
+    atr = tr.rolling(period).mean().dropna()
+    
+    if atr.empty or pd.isna(atr.iloc[-1]):
+        return float(close.iloc[-1] * 0.02)
     return float(atr.iloc[-1])
 
 def verifica_regime_ftsemib():
@@ -152,17 +165,18 @@ def verifica_regime_ftsemib():
         df_index = yf.download("FTSEMIB.MI", period="6mo", interval="1d", progress=False)
         if df_index.empty:
             return True, 0.0
-        c = df_index['Close'].iloc[:, 0] if isinstance(df_index['Close'], pd.DataFrame) else df_index['Close']
-        p_idx = float(c.iloc[-1])
-        sma50_idx = float(c.rolling(50).mean().iloc[-1])
+        close = estrai_serie(df_index, 'Close')
+        if close.empty:
+            return True, 0.0
+        p_idx = float(close.iloc[-1])
+        sma50_series = close.rolling(50).mean().dropna()
+        sma50_idx = float(sma50_series.iloc[-1]) if not sma50_series.empty else p_idx
         bullish = p_idx >= sma50_idx
         return bullish, p_idx
     except Exception:
         return True, 0.0
 
-# Motore News & Intelligence Geopolitica
 def analizza_notizie_macro():
-    """Scansiona notizie macro e geopolitiche determinando il sentiment di mercato"""
     feed_urls = [
         "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
         "https://news.google.com/rss/search?q=elezioni+USA+Wall+Street+tassi+BCE+FED&hl=it&gl=IT&ceid=IT:it"
@@ -209,24 +223,22 @@ def analizza_notizie_macro():
 
     return sentiment, settore_favorito, desc_sentiment, notizie[:4], rilevanze
 
-# Scansione e Monitoraggio Live
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Alert su Take Profit / Stop Loss delle posizioni aperte
+    # 1. Alert Take Profit / Stop Loss sulle posizioni aperte
     for ticker, info in list(portafoglio.items()):
         try:
             d = yf.download(ticker, period="3mo", interval="1d", progress=False)
             if d.empty: continue
-            if isinstance(d.columns, pd.MultiIndex):
-                d.columns = d.columns.get_level_values(0)
+            close = estrai_serie(d, 'Close')
+            if close.empty or pd.isna(close.iloc[-1]): continue
 
-            c_series = d['Close'].iloc[:, 0] if isinstance(d['Close'], pd.DataFrame) else d['Close']
-            p_live = float(c_series.iloc[-1])
+            p_live = float(close.iloc[-1])
             pmc = info['pmc']
             quote = info['quote']
 
-            atr_val = calcola_atr(d, 14) if len(d) >= 15 else (pmc * 0.03)
+            atr_val = calcola_atr(d, 14)
             tp_dinamico = pmc + (2.0 * atr_val)
             sl_dinamico = pmc - (1.5 * atr_val)
             rend_pct = ((p_live - pmc) / pmc) * 100
@@ -253,7 +265,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
     indice_rialzista, _ = verifica_regime_ftsemib()
     regime_icon = "🟢 Favorevole" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
-    # 3. Classifica Top 10 con Ponderazione Settoriale
+    # 3. Classifica Top 10 con Prezzi Reali Puliti
     risultati = []
     for ticker, meta in PANIERE.items():
         if ticker in portafoglio:
@@ -263,32 +275,45 @@ async def esegui_scansione_e_monitoraggio(app_bot):
 
         try:
             df = yf.download(ticker, period="1y", interval="1d", progress=False)
-            if df.empty or len(df) < 30: continue
-            if isinstance(df.columns, pd.MultiIndex):
-                df.columns = df.columns.get_level_values(0)
+            if df.empty: continue
 
-            close = df['Close'].iloc[:, 0] if isinstance(df['Close'], pd.DataFrame) else df['Close']
-            volume = df['Volume'].iloc[:, 0] if isinstance(df['Volume'], pd.DataFrame) else df['Volume']
+            close = estrai_serie(df, 'Close')
+            volume = estrai_serie(df, 'Volume')
+
+            if len(close) < 25: continue
 
             p_curr = float(close.iloc[-1])
-            sma20 = float(close.rolling(20).mean().iloc[-1])
-            sma200 = float(close.rolling(200).mean().iloc[-1]) if len(close) >= 200 else float(close.rolling(50).mean().iloc[-1])
-            std20 = float(close.rolling(20).std().iloc[-1])
+            if pd.isna(p_curr) or p_curr <= 0: continue
+
+            sma20_s = close.rolling(20).mean().dropna()
+            std20_s = close.rolling(20).std().dropna()
+            sma200_s = close.rolling(200).mean().dropna() if len(close) >= 200 else close.rolling(50).mean().dropna()
+
+            sma20 = float(sma20_s.iloc[-1]) if not sma20_s.empty else p_curr
+            std20 = float(std20_s.iloc[-1]) if not std20_s.empty else 0.01
+            sma200 = float(sma200_s.iloc[-1]) if not sma200_s.empty else p_curr
+
             z_score = (p_curr - sma20) / std20 if std20 > 0 else 0.0
 
             delta = close.diff()
             g = (delta.where(delta > 0, 0)).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rs = g / l
-            rsi = float((100 - (100 / (1 + rs))).iloc[-1])
+            rs = g / l.replace(0, np.nan)
+            rsi_s = (100 - (100 / (1 + rs))).dropna()
+            rsi = float(rsi_s.iloc[-1]) if not rsi_s.empty else 50.0
 
-            vol_last = float(volume.iloc[-1])
-            sma_vol = float(volume.rolling(20).mean().iloc[-1])
-            vol_ratio = (vol_last / sma_vol) if sma_vol > 0 else 1.0
+            vol_ratio = 1.0
+            if not volume.empty:
+                vol_clean = volume[volume > 0]
+                if len(vol_clean) >= 20:
+                    vol_last = float(vol_clean.iloc[-1])
+                    sma_vol = float(vol_clean.rolling(20).mean().iloc[-1])
+                    if sma_vol > 0:
+                        vol_ratio = vol_last / sma_vol
 
             atr = calcola_atr(df, 14)
             tp_stimato = p_curr + (2.0 * atr)
-            sl_stimato = p_curr - (1.5 * atr)
+            sl_stimato = max(0.01, p_curr - (1.5 * atr))
 
             score = 50.0
             if indice_rialzista: score += 5
@@ -305,7 +330,6 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             if p_curr > sma200: score += 8
             else: score -= 12
 
-            # Ponderazione Macro Notizie
             macro_tag = ""
             if sentiment == "BULLISH" and settore == "export":
                 score += 10
@@ -325,10 +349,12 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 "vol_ratio": vol_ratio, "atr": atr, "tp": tp_stimato,
                 "sl": sl_stimato, "macro_tag": macro_tag
             })
-        except Exception:
+        except Exception as e:
+            logging.error(f"Errore analisi {ticker}: {e}")
             continue
 
     if not risultati:
+        await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text="ℹ️ Dati di borsa in aggiornamento. Riprova tra poco.")
         return
 
     risultati.sort(key=lambda x: x["score"], reverse=True)
@@ -353,7 +379,7 @@ async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
     if datetime.now().weekday() < 5:
         await esegui_scansione_e_monitoraggio(context.bot)
 
-# Comandi Operativi
+# Comandi Utente
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 3:
@@ -367,7 +393,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         quote = int(args[1])
         pmc = float(args[2].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Valori numerici non validi.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Valori non validi.", parse_mode='HTML')
         return
 
     nome = PANIERE.get(ticker, {}).get("nome", ticker)
@@ -384,7 +410,7 @@ async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"✅ <b>ACQUISTO REGISTRATO!</b>\n\n"
         f"• Titolo: <b>{nome}</b> (<code>{ticker}</code>)\n"
         f"• Quantità: <code>{quote} quote</code> | PMC: <code>€{pmc:.3f}</code>\n"
-        f"• Controvalore totale: <code>€{quote * pmc:.2f}</code>",
+        f"• Controvalore: <code>€{quote * pmc:.2f}</code>",
         parse_mode='HTML'
     )
 
@@ -400,7 +426,7 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         prezzo_vendita = float(args[1].replace(",", "."))
     except ValueError:
-        await update.message.reply_text("⚠️ Prezzo di vendita non valido.", parse_mode='HTML')
+        await update.message.reply_text("⚠️ Prezzo non valido.", parse_mode='HTML')
         return
 
     portafoglio = carica_portafoglio()
@@ -432,13 +458,11 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg, parse_mode='HTML')
 
 async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Visualizza il portafoglio arricchito con l'impatto delle notizie macro sul singolo titolo"""
     portafoglio = carica_portafoglio()
     if not portafoglio:
         await update.message.reply_text("💼 Nessun titolo attualmente attivo nel portafoglio.")
         return
 
-    # Lettura notizie e sentiment macro
     sentiment, settore_fav, desc_sentiment, news, _ = analizza_notizie_macro()
 
     msg = (
@@ -457,12 +481,10 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             d = yf.download(t, period="3mo", interval="1d", progress=False)
             if not d.empty:
-                if isinstance(d.columns, pd.MultiIndex):
-                    d.columns = d.columns.get_level_values(0)
-                c_series = d['Close'].iloc[:, 0] if isinstance(d['Close'], pd.DataFrame) else d['Close']
-                p_live = float(c_series.iloc[-1])
-                if len(d) >= 15:
-                    atr_val = calcola_atr(d, 14)
+                close = estrai_serie(d, 'Close')
+                if not close.empty and not pd.isna(close.iloc[-1]):
+                    p_live = float(close.iloc[-1])
+                atr_val = calcola_atr(d, 14)
         except Exception:
             pass
 
@@ -473,12 +495,11 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         rend_attuale = ((p_live - pmc) / pmc) * 100
         tp_prezzo = pmc + (2.0 * atr_val)
-        sl_prezzo = pmc - (1.5 * atr_val)
+        sl_prezzo = max(0.01, pmc - (1.5 * atr_val))
         manca_tp = ((tp_prezzo - p_live) / p_live) * 100
         margine_sl = ((p_live - sl_prezzo) / p_live) * 100
         segno = "🟢" if rend_attuale >= 0 else "🔴"
 
-        # Valutazione Impatto Notizie sul singolo titolo posseduto
         settore = PANIERE.get(t, {}).get("settore", "generico")
         impatto_macro = "⚪ Neutro / Tecnico"
         if sentiment == "BULLISH" and settore == "export":
@@ -675,7 +696,7 @@ async def cmd_basket(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# Callback Bottoni Interattivi
+# Callback Bottoni
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -790,7 +811,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram avviato con News Intelligence integrata nelle Top 10 e nel Portafoglio...")
+    print("🤖 Bot Telegram avviato con estrazione prezzi pulita e resiliente a borsa chiusa...")
     app.run_polling()
 
 if __name__ == "__main__":
