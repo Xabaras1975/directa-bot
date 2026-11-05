@@ -250,7 +250,7 @@ def verifica_imminenza_earnings(ticker_obj, giorni_buffer=2):
     return False, None
 
 def analizza_notizie_macro():
-    # Aggiunto il filtro temporale 'when:3d' per forzare solo notizie recentissime
+    # Filtro 'when:3d' per garantire che le notizie analizzate siano delle ultime 72 ore
     feed_urls = [
         "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia+when:3d&hl=it&gl=IT&ceid=IT:it",
         "https://news.google.com/rss/search?q=tassi+BCE+FED+dazi+inflazione+when:3d&hl=it&gl=IT&ceid=IT:it"
@@ -324,7 +324,10 @@ def analizza_notizie_macro():
         "debito": f_debito
     }
 
-    return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze    info = PANIERE.get(ticker)
+    return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze
+
+def calcola_macro_impact(ticker, fattori):
+    info = PANIERE.get(ticker)
     if not info: return 0.0
 
     b_dazi = info.get("beta_dazi", 0.0)
@@ -964,7 +967,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram operativo: Scansione Mean Reversion + Filtro Macro + Blocco Pre-Earnings...")
+    print("🤖 Bot Telegram operativo: Scansione Mean Reversion + Filtro Macro Fresco + Blocco Pre-Earnings...")
     app.run_polling()
 
 if __name__ == "__main__":
