@@ -5,7 +5,7 @@ import asyncio
 import math
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, time
+from datetime import datetime, date, timedelta, time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
 import pandas as pd
@@ -39,7 +39,6 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 POSIZIONI_PREDEFINITE = {}
 
 # PANIERE AGGIORNATO CON MATRICE DI SENSIBILITA' FATTORIALE (BETA MACRO)
-# Nota: Maire Tecnimont aggiornato in MAIRE.MI e Webuild aggiornato in WBD.MI
 PANIERE = {
     # Ciclici, Industriali & Export
     "STLAM.MI": {"nome": "Stellantis", "settore": "export", "beta_dazi": 0.85, "beta_tassi": -0.30, "beta_geopolitica": -0.40, "beta_debito": 0.20},
@@ -226,6 +225,30 @@ def verifica_regime_ftsemib():
     except Exception:
         return True, 0.0
 
+# VERIFICA EVENTO EARNINGS / CALENDARIO SOCIETARIO (BUFFER 2 GIORNI)
+def verifica_imminenza_earnings(ticker_obj, giorni_buffer=2):
+    try:
+        cal = ticker_obj.calendar
+        oggi = date.today()
+        earnings_date = None
+
+        if isinstance(cal, dict) and "Earnings Date" in cal:
+            date_list = cal["Earnings Date"]
+            if date_list and len(date_list) > 0:
+                earnings_date = date_list[0]
+        elif isinstance(cal, pd.DataFrame) and "Earnings Date" in cal.index:
+            earnings_date = cal.loc["Earnings Date"].iloc[0]
+
+        if earnings_date is not None:
+            if isinstance(earnings_date, (datetime, pd.Timestamp)):
+                earnings_date = earnings_date.date()
+            diff_giorni = (earnings_date - oggi).days
+            if 0 <= diff_giorni <= giorni_buffer:
+                return True, earnings_date.strftime("%d/%m/%Y")
+    except Exception:
+        pass
+    return False, None
+
 def analizza_notizie_macro():
     feed_urls = [
         "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
@@ -369,11 +392,11 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg += "\n💡 <i>I vettori fattoriali stimano l'impatto economico a 5-10 sedute.</i>"
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# SCANSIONE QUANTITATIVA OTTIMIZZATA (FILTRO CANDELA VERDE + REVERSION SMA20)
+# SCANSIONE QUANTITATIVA OTTIMIZZATA (FILTRO CONFERMA + REVERSION SMA20 + BLOCCO EARNINGS)
 async def esegui_scansione_e_monitoraggio(app_bot):
     portafoglio = carica_portafoglio()
 
-    # 1. Alert di Uscita sulle posizioni in essere
+    # 1. Alert di Uscita sulle posizioni aperte
     for ticker, info in list(portafoglio.items()):
         try:
             d = yf.download(ticker, period="3mo", interval="1d", progress=False)
@@ -413,20 +436,22 @@ async def esegui_scansione_e_monitoraggio(app_bot):
     indice_rialzista, _ = verifica_regime_ftsemib()
     regime_icon = "🟢 Favorevole (Sopra SMA 50)" if indice_rialzista else "🟠 Prudente (Sotto SMA 50)"
 
-    # 3. Scansione Titoli con Modello Statistico Ottimizzato
+    # 3. Scansione Paniere con Filtro Candela di Conferma e Blocco Earnings
     segnali_validati = []
+    segnali_bloccati_earnings = []
+
     for ticker, meta in PANIERE.items():
         if ticker in portafoglio: continue
         if meta['settore'] in ['cash', 'etf']: continue
         nome = meta["nome"]
 
         try:
-            df = yf.download(ticker, period="1y", interval="1d", progress=False)
+            ticker_obj = yf.Ticker(ticker)
+            df = ticker_obj.history(period="1y", interval="1d")
             if df.empty: continue
 
             close = estrai_serie(df, 'Close')
             open_p = estrai_serie(df, 'Open')
-            high = estrai_serie(df, 'High')
             low = estrai_serie(df, 'Low')
             if len(close) < 200: continue
 
@@ -440,7 +465,7 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             rs = g / l.replace(0, np.nan)
             rsi_s = (100 - (100 / (1 + rs))).dropna()
 
-            # Valori attuali (t) e barra precedente (t-1)
+            # Valori candela odierna (t) e barra precedente (t-1)
             p_curr = float(close.iloc[-1])
             o_curr = float(open_p.iloc[-1])
             p_prev = float(close.iloc[-2])
@@ -452,13 +477,21 @@ async def esegui_scansione_e_monitoraggio(app_bot):
             rsi_prev = float(rsi_s.iloc[-2])
             sma200_prev = float(sma200_s.iloc[-2])
 
-            # Setup Ipervenduto (t-1)
+            # Setup di ipervenduto e conferma rimbalzo
             setup_ipervenduto = (z_score_prev <= -1.4 and rsi_prev <= 40 and p_prev >= (sma200_prev * 0.93))
-            
-            # Candela Verde di Conferma (t)
             conferma_rimbalzo = (p_curr > o_curr and p_curr > p_prev)
 
             if setup_ipervenduto and conferma_rimbalzo and indice_rialzista:
+                # Controllo blocco calendario trimestrali/bilanci
+                imminente, data_earn = verifica_imminenza_earnings(ticker_obj, giorni_buffer=2)
+                if imminente:
+                    segnali_bloccati_earnings.append({
+                        "ticker": ticker,
+                        "nome": nome,
+                        "data_earn": data_earn
+                    })
+                    continue
+
                 atr = calcola_atr(df, 14)
                 tp = sma20_curr
                 sl = min(low_prev, low_curr) - (0.8 * atr)
@@ -475,6 +508,12 @@ async def esegui_scansione_e_monitoraggio(app_bot):
         except Exception:
             continue
 
+    notifica_earnings = ""
+    if segnali_bloccati_earnings:
+        notifica_earnings = "\n\n⚠️ <b>TITOLI CON SETUP FILTRATI PER EARNINGS IMMINENTI:</b>\n"
+        for eb in segnali_bloccati_earnings:
+            notifica_earnings += f"• <b>{eb['nome']}</b> (<code>{eb['ticker']}</code>): Trimestrale/Bilancio prevista il <b>{eb['data_earn']}</b>\n"
+
     if not segnali_validati:
         await app_bot.send_message(
             chat_id=TELEGRAM_CHAT_ID,
@@ -484,30 +523,29 @@ async def esegui_scansione_e_monitoraggio(app_bot):
                 f"🧭 <i>Clima Macro: {desc_sentiment}</i>\n\n"
                 f"ℹ️ Nessun titolo presenta attualmente la combinazione convalidata:\n"
                 f"• Ipervenduto (Z-Score ≤ -1.4, RSI ≤ 40)\n"
-                f"• Candela verde di conferma rimbalzo\n\n"
+                f"• Candela verde di conferma rimbalzo\n"
+                f"• Assenza di trimestrali nei 2 giorni successivi"
+                f"{notifica_earnings}\n\n"
                 f"<i>Filtro attivo a protezione del capitale (Win Rate storico 75.7%).</i>"
             ),
             parse_mode='HTML'
         )
         return
 
-    msg = (
-        f"🎯 <b>OPPORTUNITÀ CONVALIDATE (Win Rate storico 75.7%)</b>\n"
-        f"🌐 <i>FTSE MIB: {regime_icon}</i>\n"
-        f"🧭 <i>Clima Macro: {desc_sentiment}</i>\n\n"
-    )
     for s in segnali_validati:
         tasti = InlineKeyboardMarkup([
             [InlineKeyboardButton(f"🛒 Registra Acquisto {s['ticker']}", callback_data=f"buy_{s['ticker']}_{s['prezzo']:.3f}")],
             [InlineKeyboardButton("❌ Ignora Segnale", callback_data=f"ignora_{s['ticker']}")]
         ])
         testo_singolo = (
+            f"🎯 <b>OPPORTUNITÀ CONVALIDATA (Win Rate 75.7%)</b>\n\n"
             f"📌 <b>{s['nome']}</b> (<code>{s['ticker']}</code>)\n"
             f"• Prezzo Ingresso: <code>€{s['prezzo']:.3f}</code>\n"
             f"• 🎯 <b>Target (SMA 20):</b> <code>€{s['tp']:.3f}</code> (+{s['gain_pct']:.2f}%)\n"
             f"• ⚠️ <b>Stop Loss (Swing Low):</b> <code>€{s['sl']:.3f}</code> (-{s['risk_pct']:.2f}%)\n"
             f"• Indicatori: RSI {s['rsi']:.1f} | Z-Score {s['z_score']:+.2f}σ\n"
             f"• Ponderazione Macro: <b>{s['emi']:+.1f}%</b>\n"
+            f"• Calendario Societario: <i>Nessuna trimestrale imminente (OK)</i>\n"
         )
         await app_bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo_singolo, parse_mode='HTML', reply_markup=tasti)
 
@@ -516,7 +554,7 @@ async def job_schedulato(context: ContextTypes.DEFAULT_TYPE):
         await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🔍 Scansione quantitativa avanzata con filtro di conferma in corso...")
+    await update.message.reply_text("🔍 Scansione quantitativa con filtro conferma ed earnings in corso...")
     await esegui_scansione_e_monitoraggio(context.bot)
 
 async def cmd_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -927,7 +965,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram operativo su tutti i moduli con motore di scansione ottimizzato...")
+    print("🤖 Bot Telegram operativo: Scansione Mean Reversion + Filtro Macro + Blocco Pre-Earnings...")
     app.run_polling()
 
 if __name__ == "__main__":
