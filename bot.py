@@ -250,9 +250,10 @@ def verifica_imminenza_earnings(ticker_obj, giorni_buffer=2):
     return False, None
 
 def analizza_notizie_macro():
+    # Aggiunto il filtro temporale 'when:3d' per forzare solo notizie recentissime
     feed_urls = [
-        "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia&hl=it&gl=IT&ceid=IT:it",
-        "https://news.google.com/rss/search?q=elezioni+USA+Wall+Street+tassi+BCE+FED+dazi&hl=it&gl=IT&ceid=IT:it"
+        "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia+when:3d&hl=it&gl=IT&ceid=IT:it",
+        "https://news.google.com/rss/search?q=tassi+BCE+FED+dazi+inflazione+when:3d&hl=it&gl=IT&ceid=IT:it"
     ]
     notizie = []
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -264,7 +265,8 @@ def analizza_notizie_macro():
                 root = ET.fromstring(r.content)
                 for item in root.findall('.//item')[:5]:
                     titolo = item.find('title').text if item.find('title') is not None else ""
-                    if titolo: notizie.append(titolo)
+                    if titolo: 
+                        notizie.append(titolo)
         except Exception:
             continue
 
@@ -322,10 +324,7 @@ def analizza_notizie_macro():
         "debito": f_debito
     }
 
-    return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze
-
-def calcola_macro_impact(ticker, fattori):
-    info = PANIERE.get(ticker)
+    return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze    info = PANIERE.get(ticker)
     if not info: return 0.0
 
     b_dazi = info.get("beta_dazi", 0.0)
