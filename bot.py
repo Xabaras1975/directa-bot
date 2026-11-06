@@ -38,7 +38,7 @@ ATTESA_DETTAGLI_ACQUISTO = 1
 
 POSIZIONI_PREDEFINITE = {}
 
-# PANIERE AZIONARIO FTSEMIB / ITALIA CON MATRICE DI SENSIBILITA' FATTORIALE
+# PANIERE AZIONARIO FTSEMIB CON MATRICE DI SENSIBILITA' FATTORIALE (BETA MACRO)
 PANIERE = {
     # Ciclici, Industriali & Export
     "STLAM.MI": {"nome": "Stellantis", "settore": "export", "beta_dazi": 0.85, "beta_tassi": -0.30, "beta_geopolitica": -0.40, "beta_debito": 0.20},
@@ -84,7 +84,7 @@ def avvia_server_porta():
     logging.info(f"Server web attivo sulla porta {porta}")
     server.serve_forever()
 
-# --- GESTIONE DATI CON GITHUB GIST E PERSISTENZA CLOUD ---
+# --- GESTIONE DATI CON GITHUB GIST E FALLBACK LOCALE ---
 def _leggi_gist_file(nome_file, default_val):
     if not GIST_ID or not GITHUB_TOKEN:
         return None
@@ -271,22 +271,24 @@ def verifica_imminenza_earnings(ticker_obj, giorni_buffer=2):
         pass
     return False, None
 
+# FEED MACRO POTENZIATI: Topic Business Google News + ANSA Economia + Query Mirata
 def analizza_notizie_macro():
     feed_urls = [
-        "https://news.google.com/rss/search?q=Borsa+Italiana+FTSE+MIB+economia+when:3d&hl=it&gl=IT&ceid=IT:it",
-        "https://news.google.com/rss/search?q=tassi+BCE+FED+dazi+inflazione+when:3d&hl=it&gl=IT&ceid=IT:it"
+        "https://news.google.com/rss/headlines/section/topic/BUSINESS?hl=it&gl=IT&ceid=IT:it",
+        "https://www.ansa.it/sito/notizie/economia/economia_rss.xml",
+        "https://news.google.com/rss/search?q=(Borsa+OR+mercati+OR+BCE+OR+FED+OR+dazi+OR+inflazione)+when:7d&hl=it&gl=IT&ceid=IT:it"
     ]
     notizie = []
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
 
     for url in feed_urls:
         try:
             r = requests.get(url, headers=headers, timeout=6)
             if r.status_code == 200:
                 root = ET.fromstring(r.content)
-                for item in root.findall('.//item')[:5]:
+                for item in root.findall('.//item')[:8]:
                     titolo = item.find('title').text if item.find('title') is not None else ""
-                    if titolo: 
+                    if titolo and titolo not in notizie: 
                         notizie.append(titolo)
         except Exception:
             continue
@@ -300,39 +302,39 @@ def analizza_notizie_macro():
 
     for n in notizie:
         nl = n.lower()
-        if any(p in nl for p in ["dazi", "tariffe", "protezionismo", "guerra commerciale"]):
-            f_dazi -= 0.4
+        if any(p in nl for p in ["dazi", "tariffe", "protezionismo", "guerra commerciale", "sanzioni"]):
+            f_dazi -= 0.35
             rilevanze.append(f"Dazi/Commercio: {n}")
-        if any(p in nl for p in ["accordo commerciale", "intesa", "apertura mercati", "export"]):
-            f_dazi += 0.3
+        if any(p in nl for p in ["accordo commerciale", "intesa", "apertura mercati", "export in crescita"]):
+            f_dazi += 0.25
 
-        if any(p in nl for p in ["taglio tassi", "bce taglia", "fed taglia", "allentamento"]):
-            f_tassi -= 0.4
-        if any(p in nl for p in ["tassi alti", "inflazione persistente", "stretta monetaria"]):
-            f_tassi += 0.4
+        if any(p in nl for p in ["taglio tassi", "bce taglia", "fed taglia", "allentamento monetario"]):
+            f_tassi -= 0.35
+        if any(p in nl for p in ["tassi alti", "inflazione", "stretta monetaria", "falco", "rialzo tassi"]):
+            f_tassi += 0.35
 
-        if any(p in nl for p in ["guerra", "tensione", "missili", "escalation", "petrolio in rialzo"]):
-            f_geopolitica += 0.4
+        if any(p in nl for p in ["guerra", "tensione", "missili", "escalation", "conflitto", "crisi medioriente", "petrolio in rialzo"]):
+            f_geopolitica += 0.35
             rilevanze.append(f"Geopolitica: {n}")
 
-        if any(p in nl for p in ["spread btp", "debito", "deficit", "crisi politica"]):
-            f_debito -= 0.3
-        if any(p in nl for p in ["fiducia mercati", "promozione rating", "spread in calo"]):
-            f_debito += 0.3
+        if any(p in nl for p in ["spread", "btp", "debito pubblico", "deficit", "declassamento", "manovra"]):
+            f_debito -= 0.30
+        if any(p in nl for p in ["promozione rating", "fiducia mercati", "spread in calo", "pil in crescita"]):
+            f_debito += 0.30
 
     f_dazi = float(np.clip(f_dazi, -1.0, 1.0))
     f_tassi = float(np.clip(f_tassi, -1.0, 1.0))
     f_geopolitica = float(np.clip(f_geopolitica, -1.0, 1.0))
     f_debito = float(np.clip(f_debito, -1.0, 1.0))
 
-    if f_dazi >= 0.2 and f_tassi <= 0.0:
-        desc_sentiment = "🟢 PROPENSIONE AL RISCHIO (Commercio Aperto / Tassi Non Ostili)"
-        settore_fav = "export"
-    elif f_dazi < -0.2 or f_geopolitica >= 0.3:
-        desc_sentiment = "🔴 PRUDENZA (Rischio Dazi / Tensioni Geopolitiche)"
+    if f_dazi <= -0.2 or f_geopolitica >= 0.3:
+        desc_sentiment = "🔴 PRUDENZA (Rischio Geopolitico / Tensioni Commerciali)"
         settore_fav = "utility"
-    elif f_tassi > 0.2:
-        desc_sentiment = "🟡 TASSI SOSTENUTI (Favorevole al Margine Bancario)"
+    elif f_dazi >= 0.2 and f_tassi <= 0.0:
+        desc_sentiment = "🟢 PROPENSIONE AL RISCHIO (Scenario Espansivo / Export)"
+        settore_fav = "export"
+    elif f_tassi >= 0.25:
+        desc_sentiment = "🟡 TASSI ELEVATI (Favorevole al Margine Finanziario/Bancario)"
         settore_fav = "finanza"
     else:
         desc_sentiment = "⚪ EQUILIBRATO (Fattori Bilanciati / Focus Tecnico)"
@@ -345,7 +347,7 @@ def analizza_notizie_macro():
         "debito": f_debito
     }
 
-    return desc_sentiment, settore_fav, fattori, notizie[:4], rilevanze
+    return desc_sentiment, settore_fav, fattori, notizie[:5], rilevanze
 
 def calcola_macro_impact(ticker, fattori):
     info = PANIERE.get(ticker)
@@ -365,7 +367,7 @@ def calcola_macro_impact(ticker, fattori):
 
     return float(np.clip(impatto, -100.0, 100.0))
 
-# FUNZIONE LOGISTICA PER STIMA WIN RATE ATTESO (0 - 100%)
+# FUNZIONE LOGISTICA PER STIMA WIN RATE ATTESO
 def calcola_probabilita_setup(z_score, rsi, candela_verde, vol_ratio, adx, emi, dist_52w):
     score_z = np.clip((-z_score - 0.5) / 1.5, 0, 1) * 3.0
     score_rsi = np.clip((45.0 - rsi) / 25.0, 0, 1) * 2.0
@@ -375,7 +377,6 @@ def calcola_probabilita_setup(z_score, rsi, candela_verde, vol_ratio, adx, emi, 
     score_min = 1.0 if dist_52w >= 1.04 else 0.0
 
     score_totale = score_z + score_rsi + score_vol + score_adx + score_emi + score_min
-    # Calibrazione logistica ancorata al 75.7% storico
     prob_win = 40.0 + (46.0 / (1.0 + np.exp(-(score_totale - 5.0) / 1.5)))
     return round(float(prob_win), 1), round(float(score_totale), 1)
 
@@ -521,7 +522,7 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         f"🧭 <b>MACRO FACTOR INTELLIGENCE & SCENARIO</b>\n\n"
         f"📊 <b>Regime Globale:</b>\n<b>{desc_sentiment}</b>\n\n"
-        f"⚙️ <b>Vettori di Rischio Rilevati (Ultime 72h):</b>\n"
+        f"⚙️ <b>Vettori di Rischio Rilevati:</b>\n"
         f"• Commercio/Dazi: <code>{fattori['dazi']:+.2f}σ</code>\n"
         f"• Tassi/Politica Monetaria: <code>{fattori['tassi']:+.2f}σ</code>\n"
         f"• Tensione Geopolitica: <code>{fattori['geopolitica']:+.2f}σ</code>\n"
@@ -918,13 +919,12 @@ async def cmd_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(msg, parse_mode='HTML')
 
-# --- DISPATCHER PULSANTI CALLBACK ---
+# --- GESTIONE BOTTONI CALLBACK INTERATTIVI ---
 async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    # Azioni Console Rapida
     if data == "btn_scan":
         await cmd_scan(update, context)
         return ConversationHandler.END
@@ -941,7 +941,6 @@ async def bottone_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await cmd_storico(update, context)
         return ConversationHandler.END
 
-    # Gestione Segnali di Uscita e Acquisto
     if data.startswith("venduto_"):
         parti = data.split("_")
         ticker = parti[1]
@@ -1070,7 +1069,7 @@ def main():
     if app.job_queue:
         app.job_queue.run_daily(job_schedulato, time=time(hour=18, minute=0))
 
-    print("🤖 Bot Telegram Azionario Attivo: Console + Top 10 Win Rate + Filtri Rigorosi...")
+    print("🤖 Bot Telegram Azionario Attivo: Console + Top 10 Win Rate + Feed Macro Certificati...")
     app.run_polling()
 
 if __name__ == "__main__":
