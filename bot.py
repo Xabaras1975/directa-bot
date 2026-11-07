@@ -271,9 +271,6 @@ def calcola_probabilita_setup(z_score, rsi, candela_verde, vol_ratio, adx, emi, 
     prob_win = 40.0 + (46.0 / (1.0 + np.exp(-(score_totale - 5.0) / 1.5)))
     return round(float(prob_win), 1), round(float(score_totale), 1)
 
-# ==============================================================================
-# NUOVA CONSOLE: COCKPIT OPERATIVO CONCENTRATO SU 3 FASI
-# ==============================================================================
 def genera_tastiera_cockpit():
     return InlineKeyboardMarkup([
         [
@@ -303,7 +300,7 @@ async def cmd_console(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "<i>Tutto ciò di cui hai bisogno in 3 passaggi:</i>\n\n"
         f"💼 <b>Stato:</b> {stato_titoli}\n\n"
         "<b>1️⃣ Decisione di Ingresso:</b>\n"
-        "• Premi <b>🎯 COSA COMPRARE OGGI?</b> per vedere se oggi c'è un segnale convalidato.\n"
+        "• Premi <b>🎯 COSA COMPRARE OGGI?</b> per verificare setup convalidati.\n"
         "• Premi <b>🏆 CLASSIFICA</b> per monitorare i 10 titoli più promettenti.\n\n"
         "<b>2️⃣ Gestione e Monitoraggio:</b>\n"
         "• Premi <b>💼 IL MIO PORTAFOGLIO</b> per controllare profitti e target live.\n\n"
@@ -317,7 +314,6 @@ async def cmd_console(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif update.callback_query:
         await update.callback_query.message.reply_text(testo, parse_mode='HTML', reply_markup=tasti)
 
-# --- COSA COMPRARE OGGI (/scan) ---
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_wait = "🔍 <i>Verifica opportunità in corso su Piazza Affari...</i>"
     if update.message: await update.message.reply_text(msg_wait, parse_mode='HTML')
@@ -345,11 +341,11 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delta = close.diff()
             g = delta.where(delta > 0, 0).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi_prev = float((100 - (100 / (1 + (g / l.replace(0, np.nan)))))).dropna().iloc[-2])
+            rs = g / l.replace(0, np.nan)
+            rsi_prev = float((100 - (100 / (1 + rs))).dropna().iloc[-2])
 
             z_prev = (p_prev - sma20_prev) / std20_prev if std20_prev > 0 else 0.0
 
-            # Filtri
             setup_ipervenduto = (z_prev <= -1.4 and rsi_prev <= 40 and p_prev >= (sma200_prev * 0.93))
             conferma_verde = (p_curr > o_curr and p_curr > p_prev)
             
@@ -409,7 +405,6 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await context.bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=testo, parse_mode='HTML', reply_markup=tasti)
 
-# --- CLASSIFICA ORDINATA WIN RATE (/top10) ---
 async def cmd_top10(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_wait = "⏳ <i>Ordinamento titoli per probabilità statistica...</i>"
     if update.message: await update.message.reply_text(msg_wait, parse_mode='HTML')
@@ -422,7 +417,7 @@ async def cmd_top10(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             d = yf.download(ticker, period="1y", interval="1d", progress=False)
             if d.empty or len(d) < 200: continue
-            close, open_p, low, volume = estrai_serie(d, 'Close'), estrai_serie(d, 'Open'), estrai_serie(d, 'Low'), estrai_serie(df:=d, 'Volume')
+            close, open_p, low, volume = estrai_serie(d, 'Close'), estrai_serie(d, 'Open'), estrai_serie(d, 'Low'), estrai_serie(d, 'Volume')
             p_curr, p_prev, o_curr = float(close.iloc[-1]), float(close.iloc[-2]), float(open_p.iloc[-1])
             sma20 = float(close.rolling(20).mean().dropna().iloc[-1])
             std20 = float(close.rolling(20).std().dropna().iloc[-1])
@@ -431,7 +426,8 @@ async def cmd_top10(update: Update, context: ContextTypes.DEFAULT_TYPE):
             delta = close.diff()
             g = delta.where(delta > 0, 0).rolling(14).mean()
             l = (-delta.where(delta < 0, 0)).rolling(14).mean()
-            rsi = float((100 - (100 / (1 + (g / l.replace(0, np.nan)))))).dropna().iloc[-1])
+            rs = g / l.replace(0, np.nan)
+            rsi = float((100 - (100 / (1 + rs))).dropna().iloc[-1])
 
             candela_verde = (p_curr > o_curr and p_curr > p_prev)
             vol_clean = volume[volume > 0]
@@ -468,7 +464,6 @@ async def cmd_top10(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message: await update.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
     elif update.callback_query: await update.callback_query.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
 
-# --- IL MIO PORTAFOGLIO (/portafoglio) ---
 async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     portafoglio = carica_portafoglio()
     if not portafoglio:
@@ -528,7 +523,6 @@ async def cmd_portafoglio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message: await update.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
     elif update.callback_query: await update.callback_query.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
 
-# --- METEO BORSA (/outlook) ---
 async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     desc_sentiment, fattori, news, rilevanze = analizza_notizie_macro()
     msg = (
@@ -546,7 +540,6 @@ async def cmd_outlook(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message: await update.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
     elif update.callback_query: await update.callback_query.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
 
-# --- STORICO TRADE (/storico) ---
 async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
     storico = carica_storico()
     if not storico:
@@ -569,13 +562,11 @@ async def cmd_storico(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message: await update.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
     elif update.callback_query: await update.callback_query.message.reply_text(msg, parse_mode='HTML', reply_markup=tasti)
 
-# --- PROMPT GUIDATI PER COMPRARE E VENDERE ---
 async def guida_compra(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.callback_query.answer()
     msg = (
         "➕ <b>REGISTRAZIONE ACQUISTO</b>\n\n"
-        "Rispondi a questo messaggio indicando:\n"
-        "<b>TICKER QUOTE PREZZO</b>\n\n"
+        "Rispondi indicando: <code>TICKER QUOTE PREZZO</code>\n\n"
         "<i>Esempio pratico:</i>\n"
         "<code>ISP.MI 15 6.02</code>"
     )
@@ -621,8 +612,7 @@ async def guida_vendi(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     msg = (
         "➖ <b>REGISTRAZIONE VENDITA</b>\n\n"
-        "Rispondi a questo messaggio indicando:\n"
-        "<b>TICKER PREZZO</b>\n\n"
+        "Rispondi indicando: <code>TICKER PREZZO</code>\n\n"
         "<i>Esempio pratico:</i>\n"
         "<code>A2A.MI 2.438</code>"
     )
@@ -664,7 +654,6 @@ async def esegui_vendi_guidata(update: Update, context: ContextTypes.DEFAULT_TYP
     )
     return ConversationHandler.END
 
-# --- ROUTER PULSANTI CALLBACK ---
 async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
@@ -688,7 +677,7 @@ async def callback_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['pending_prezzo'] = float(prezzo)
         await query.edit_message_text(
             f"🛒 Acquisto <b>{ticker}</b> a ~<code>€{prezzo}</code>\n"
-            f"Rispondi con quante quote hai comprato e a che prezzo (es: <code>10 a {prezzo}</code>):",
+            f"Rispondi indicando quote e prezzo (es: <code>10 a {prezzo}</code>):",
             parse_mode='HTML'
         )
         return ATTESA_DETTAGLI_ACQUISTO
@@ -712,7 +701,7 @@ async def registra_dettagli_acquisto(update: Update, context: ContextTypes.DEFAU
 
 async def post_init_config(app):
     comandi = [
-        BotCommand("start", "Apri la plancia di comando principale"),
+        BotCommand("start", "Apri la plancia comandi principale"),
         BotCommand("console", "Visualizza il cockpit operativo"),
         BotCommand("scan", "Verifica cosa comprare oggi"),
         BotCommand("portafoglio", "Stato investimenti e P&L"),
@@ -747,7 +736,7 @@ def main():
     app.add_handler(CommandHandler("outlook", cmd_outlook))
     app.add_handler(CommandHandler("storico", cmd_storico))
 
-    print("🤖 Cockpit Diretto Operativo...")
+    print("🤖 Cockpit Diretto Operativo e Avviato con Successo...")
     app.run_polling()
 
 if __name__ == "__main__":
