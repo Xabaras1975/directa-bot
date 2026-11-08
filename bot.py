@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # 1. CONFIGURAZIONE E PARAMETRI QUANTITATIVI CERTIFICATI (88.9% WR | PF 5.48)
 # ==============================================================================
-TOKEN = os.getenv("TELEGRAM_TOKEN", "INSERISCI_QUI_IL_TUO_TOKEN")
+TOKEN = "8645159870:AAHEj0C5ffCoU_6a5ujTNXaWkYvAdqDmOe4"
 PORT = int(os.environ.get("PORT", 10000))
 
 PORTAFOGLIO_FILE = "portafoglio.json"
