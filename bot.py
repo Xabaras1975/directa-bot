@@ -47,30 +47,32 @@ CAPITALE_DEFAULT = 300.0     # Taglia standard per operazione (€)
 COMMISSIONE_DIRECTA = 3.0    # €1.50 acquisto + €1.50 vendita (Profilo Variabile)
 
 RSI_MAX_TRIGGER = 36.0       # Soglia aurea compressione RSI(14)
-TP_TARGET_PCT = 0.042        # Take Profit fisso a +4.2% (usa 0.035 per il profilo 90% WR)
+TP_TARGET_PCT = 0.042        # Take Profit fisso a +4.2%
 SL_ATR_MULT = 1.5            # Stop Loss iniziale a 1.5x ATR(14)
 BE_TRIGGER_PCT = 0.025       # Attivazione Breakeven al raggiungimento di +2.5%
 BE_LOCK_PCT = 0.018          # Livello Stop Breakeven a +1.8% (copre €3 fee + utile netto)
 MAX_GIORNI_HOLD = 15         # Time-Stop massimo (giorni di borsa)
 
 # ==============================================================================
-# 2. WEB SERVER NATIVO KEEP-ALIVE PER RENDER (NESSUNA LIBRERIA RICHIESTA)
+# 2. WEB SERVER NATIVO KEEP-ALIVE ROBUSTO PER RENDER
 # ==============================================================================
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot Quantitativo FTSE MIB Operativo (High Win-Rate Engine).")
+        self.wfile.write(b"Bot Quantitativo FTSE MIB Operativo.")
 
     def log_message(self, format, *args):
         return  # Silenzia i log HTTP superflui
 
-def run_server():
-    server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
-    server.serve_forever()
-
 def avvia_keep_alive():
+    def run_server():
+        try:
+            server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
+            server.serve_forever()
+        except Exception as e:
+            logger.error(f"Errore avvio server HTTP: {e}")
     t = Thread(target=run_server, daemon=True)
     t.start()
 
@@ -162,16 +164,11 @@ def esegui_scansione_mercato():
             cond_rsi = (rsi_prev <= RSI_MAX_TRIGGER)
             cond_reversal = (p > op and p > p_prev)
 
-            # Calcolo Score di Prossimità al Setup (0-100%)
             score = 0
-            if cond_trend:
-                score += 40
-            if rsi_prev <= 42.0:
-                score += 20
-            if cond_rsi:
-                score += 20
-            if cond_reversal:
-                score += 20
+            if cond_trend: score += 40
+            if rsi_prev <= 42.0: score += 20
+            if cond_rsi: score += 20
+            if cond_reversal: score += 20
 
             tp_price = p * (1.0 + TP_TARGET_PCT)
             sl_price = p - (SL_ATR_MULT * atr_val)
@@ -202,9 +199,7 @@ def esegui_scansione_mercato():
             logger.error(f"Errore scansione {ticker}: {e}")
             continue
 
-    # Ordina i candidati Sniper per RSI di ieri più basso (massima compressione)
     candidati_sniper.sort(key=lambda x: x["rsi_ieri"])
-    # Ordina la classifica generale per Score decrescente e poi RSI crescente
     classifica_completa.sort(key=lambda x: (-x["score"], x["rsi_ieri"]))
 
     top1 = candidati_sniper[0] if candidati_sniper else None
@@ -250,11 +245,8 @@ TESTO_COCKPIT = (
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    await msg.reply_text(
-        TESTO_COCKPIT, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera()
-    )
+    await msg.reply_text(TESTO_COCKPIT, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
-# --- FASE 1: DECISIONE ---
 async def mercato_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     mib_ok, p, sma, dist = verifica_regime_ftsemib()
@@ -297,17 +289,13 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Trend rialzista (`P > SMA50 > SMA200`)\n"
             f"2. Ipervenduto marcato (`RSI_14 <= {RSI_MAX_TRIGGER}`)\n"
             "3. Candela verde di inversione (`Close > Open` e `Close > Ieri`)\n\n"
-            "💡 *Disciplina Sniper: restare liquidi e risparmiare commissioni. Usa `/top10` per monitorare i titoli più vicini.*"
+            "💡 *Disciplina Sniper: restare liquidi e risparmiare commissioni.*"
         )
         await wait_msg.edit_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
         return
 
-    avviso_pos = ""
-    if len(portafoglio) > 0:
-        avviso_pos = "\n⚠️ *Nota: Hai già una posizione attiva in portafoglio. La regola Top 1 consiglia max 1 trade attivo alla volta.*\n"
-
-    gain_lordo = CAPITALE_DEFAULT * TP_TARGET_PCT
-    gain_netto = gain_lordo - COMMISSIONE_DIRECTA
+    avviso_pos = "\n⚠️ *Nota: Hai già una posizione attiva in portafoglio.*\n" if len(portafoglio) > 0 else ""
+    gain_netto = (CAPITALE_DEFAULT * TP_TARGET_PCT) - COMMISSIONE_DIRECTA
     rischio_pct = ((top1["prezzo"] - top1["sl"]) / top1["prezzo"]) * 100.0
 
     testo = (
@@ -320,7 +308,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎯 **PIANO OPERATIVO SU DIRECTA (€{CAPITALE_DEFAULT:.0f}):**\n"
         f"• **Take Profit (+{TP_TARGET_PCT*100:.1f}%):** `€{top1['tp']:.4f}` *(Netto: +€{gain_netto:.2f})*\n"
         f"• **Stop Loss Iniziale (1.5x ATR):** `€{top1['sl']:.4f}` *(-{rischio_pct:.2f}%)*\n"
-        f"• **Trigger Breakeven (+2.5%):** a `€{top1['be_trigger']:.4f}` sposta lo Stop a `€{top1['be_lock']:.4f}` *(+1.8% bloccato)*\n"
+        f"• **Trigger Breakeven (+2.5%):** a `€{top1['be_trigger']:.4f}` sposta lo Stop a `€{top1['be_lock']:.4f}`\n"
         f"• **Time-Stop:** Max {MAX_GIORNI_HOLD} sedute\n"
         f"{avviso_pos}\n"
         f"📲 Per registrare l'eseguito digita:\n"
@@ -355,7 +343,6 @@ async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     righe.append("💡 *Il segnale scatta a Score 100% (Trend 🟢 + RSI <= 36 🔥 + Candela Verde).*")
     await wait_msg.edit_text("\n".join(righe), parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
-# --- FASE 2: GESTIONE ---
 async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
@@ -375,7 +362,6 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Inserisci valori numerici validi per prezzo e capitale.")
         return
 
-    # Calcola ATR attuale per fissare lo Stop Loss 1.5x ATR
     atr_val = prezzo_in * 0.022
     try:
         d = yf.download(ticker_full, period="3mo", interval="1d", progress=False, auto_adjust=True)
@@ -450,7 +436,6 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        # Verifica attivazione automatica Breakeven (+2.5% -> Stop a +1.8%)
         avviso_azione = "⏳ *Mantieni posizione*"
         if not pos.get("be_attivo", False) and (max_oggi >= pos["be_trigger"] or p_attuale >= pos["be_trigger"]):
             pos["be_attivo"] = True
@@ -461,23 +446,19 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             avviso_azione = f"🔒 *Breakeven Attivo (Stop protetto a €{pos['sl']:.4f})*"
 
         if p_attuale >= pos["tp"]:
-            avviso_azione = f"🎯 **TARGET RAGGIUNTO! Vendi e incassa (`/vendi {ticker} {p_attuale:.4f}`)**"
+            avviso_azione = f"🎯 **TARGET RAGGIUNTO! Vendi (`/vendi {ticker} {p_attuale:.4f}`)**"
         elif p_attuale <= pos["sl"]:
-            avviso_azione = f"🛑 **STOP COLPITO! Chiudi posizione (`/vendi {ticker} {p_attuale:.4f}`)**"
+            avviso_azione = f"🛑 **STOP COLPITO! Chiudi (`/vendi {ticker} {p_attuale:.4f}`)**"
 
         var_pct = ((p_attuale - p_in) / p_in) * 100.0
-        pnl_lordo = ((p_attuale - p_in) / p_in) * cap
-        pnl_netto = pnl_lordo - COMMISSIONE_DIRECTA
-
+        pnl_netto = (((p_attuale - p_in) / p_in) * cap) - COMMISSIONE_DIRECTA
         giorni_trascorsi = (datetime.now() - datetime.strptime(pos["data_in"], "%Y-%m-%d")).days
-        if giorni_trascorsi >= MAX_GIORNI_HOLD:
-            avviso_azione = f"⏰ **TIME-STOP ({giorni_trascorsi} gg): Valuta chiusura posizione**"
 
         icona_pnl = "🟢" if pnl_netto >= 0 else "🔴"
         righe.append(
             f"📌 **{ticker}** (In: €{p_in:.4f} | Ora: **€{p_attuale:.4f}**)\n"
             f"   {icona_pnl} Var: **{var_pct:+.2f}%** | P&L Netto Fee: **€{pnl_netto:+.2f}**\n"
-            f"   🎯 TP: `€{pos['tp']:.4f}` | 🛡️ SL Attuale: `€{pos['sl']:.4f}`\n"
+            f"   🎯 TP: `€{pos['tp']:.4f}` | 🛡️ SL: `€{pos['sl']:.4f}`\n"
             f"   ⏱️ Giorni: {giorni_trascorsi}/{MAX_GIORNI_HOLD} | {avviso_azione}\n"
             f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.4f}`\n"
         )
@@ -505,7 +486,7 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     portafoglio = carica_json(PORTAFOGLIO_FILE, {})
     if ticker_clean not in portafoglio:
-        await update.message.reply_text(f"❌ Il titolo **{ticker_clean}** non è presente in portafoglio.", parse_mode="Markdown")
+        await update.message.reply_text(f"❌ Il titolo **{ticker_clean}** non è in portafoglio.", parse_mode="Markdown")
         return
 
     pos = portafoglio.pop(ticker_clean)
@@ -545,7 +526,6 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=menu_cockpit_tastiera(),
     )
 
-# --- FASE 3: ARCHIVIO ---
 async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     storico = carica_json(STORICO_FILE, [])
@@ -572,7 +552,7 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     ultimi = storico[-5:]
     righe_ultimi = [
-        f"• **{t['ticker']}** ({t['data_out']}): **{t['var_pct']:+.1f}%** ➔ Netto: **€{t['pnl_netto']:+.2f}** ({'✅' if t['esito']=='WIN' else '❌'})"
+        f"• **{t['ticker']}** ({t['data_out']}): **{t['var_pct']:+.1f}%** ➔ Netto: **€{t['pnl_netto']:+.2f}**"
         for t in reversed(ultimi)
     ]
 
@@ -585,45 +565,39 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"⚖️ **Profit Factor Netto:** **{pf:.2f}** *(Target modello: 5.48)*\n"
         f"🏦 Commissioni Directa Pagate: €{fee_tot:.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕒 **ULTIME 5 OPERAZIONI:**\n" + "\n".join(righe_ultimi)
+        f"🕒 **ULTIME OPERAZIONI:**\n" + "\n".join(righe_ultimi)
     )
     await msg.reply_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     salva_json(PORTAFOGLIO_FILE, {})
     await update.message.reply_text(
-        "🧹 **Portafoglio attivo azzerato con successo.** Lo storico delle statistiche è stato mantenuto.",
+        "🧹 **Portafoglio attivo azzerato con successo.**",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
     )
 
-# Gestione pulsanti inline del Cockpit
 async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     data = query.data
 
-    if data == "cmd_scan":
-        await scan_cmd(update, context)
-    elif data == "cmd_top10":
-        await top10_cmd(update, context)
-    elif data == "cmd_mercato":
-        await mercato_cmd(update, context)
-    elif data == "cmd_portafoglio":
-        await portafoglio_cmd(update, context)
-    elif data == "cmd_statistiche":
-        await statistiche_cmd(update, context)
-    elif data == "cmd_start":
-        await start_cmd(update, context)
+    if data == "cmd_scan": await scan_cmd(update, context)
+    elif data == "cmd_top10": await top10_cmd(update, context)
+    elif data == "cmd_mercato": await mercato_cmd(update, context)
+    elif data == "cmd_portafoglio": await portafoglio_cmd(update, context)
+    elif data == "cmd_statistiche": await statistiche_cmd(update, context)
+    elif data == "cmd_start": await start_cmd(update, context)
 
 # ==============================================================================
 # 6. AVVIO APPLICAZIONE
 # ==============================================================================
 def main():
     avvia_keep_alive()
+    logger.info(f"Server HTTP keep-alive avviato sulla porta {PORT}.")
+
     app = Application.builder().token(TOKEN).build()
 
-    # Registrazione Comandi 3 Fasi
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("help", start_cmd))
     app.add_handler(CommandHandler("scan", scan_cmd))
@@ -636,7 +610,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot Quantitativo FTSE MIB avviato correttamente.")
+    logger.info("Bot Quantitativo FTSE MIB in ascolto su Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
