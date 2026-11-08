@@ -4,11 +4,11 @@ import logging
 import warnings
 from datetime import datetime
 from threading import Thread
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import yfinance as yf
 import pandas as pd
 import numpy as np
-from flask import Flask
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -54,19 +54,24 @@ BE_LOCK_PCT = 0.018          # Livello Stop Breakeven a +1.8% (copre €3 fee + 
 MAX_GIORNI_HOLD = 15         # Time-Stop massimo (giorni di borsa)
 
 # ==============================================================================
-# 2. WEB SERVER KEEP-ALIVE PER RENDER
+# 2. WEB SERVER NATIVO KEEP-ALIVE PER RENDER (NESSUNA LIBRERIA RICHIESTA)
 # ==============================================================================
-app_flask = Flask(__name__)
+class KeepAliveHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"Bot Quantitativo FTSE MIB Operativo (High Win-Rate Engine).")
 
-@app_flask.route("/")
-def home():
-    return "Bot Quantitativo FTSE MIB Operativo (High Win-Rate Engine).", 200
+    def log_message(self, format, *args):
+        return  # Silenzia i log HTTP superflui
 
-def run_flask():
-    app_flask.run(host="0.0.0.0", port=PORT, use_reloader=False)
+def run_server():
+    server = HTTPServer(("0.0.0.0", PORT), KeepAliveHandler)
+    server.serve_forever()
 
 def avvia_keep_alive():
-    t = Thread(target=run_flask, daemon=True)
+    t = Thread(target=run_server, daemon=True)
     t.start()
 
 # ==============================================================================
