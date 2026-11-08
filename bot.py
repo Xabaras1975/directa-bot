@@ -464,7 +464,7 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pnl_lordo = ((p_attuale - p_in) / p_in) * cap
         pnl_netto = pnl_lordo - COMMISSIONE_DIRECTA
 
-        giorni_ trascorsi = (datetime.now() - datetime.strptime(pos["data_in"], "%Y-%m-%d")).days
+        giorni_trascorsi = (datetime.now() - datetime.strptime(pos["data_in"], "%Y-%m-%d")).days
         if giorni_trascorsi >= MAX_GIORNI_HOLD:
             avviso_azione = f"⏰ **TIME-STOP ({giorni_trascorsi} gg): Valuta chiusura posizione**"
 
