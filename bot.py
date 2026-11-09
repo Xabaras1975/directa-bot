@@ -26,7 +26,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ==============================================================================
-# 1. CONFIGURAZIONE E PARAMETRI QUANTITATIVI CERTIFICATI (88.9% WR | PF 5.48)
+# 1. CONFIGURAZIONE E PARAMETRI QUANTITATIVI (FTSE MIB + WALL STREET)
 # ==============================================================================
 TOKEN = "8645159870:AAHEj0C5ffCoU_6a5ujTNXaWkYvAdqDmOe4"
 PORT = int(os.environ.get("PORT", 10000))
@@ -35,23 +35,36 @@ PORTAFOGLIO_FILE = "portafoglio.json"
 STORICO_FILE = "storico_trades.json"
 
 # Paniere Liquido Piazza Affari (FTSE MIB / Mid Cap)
-TICKERS = [
+TICKERS_ITA = [
     "STLAM.MI", "RACE.MI", "MAIRE.MI", "WBD.MI", "SFER.MI",
     "ISP.MI", "UCG.MI", "BPE.MI", "BMED.MI", "G.MI",
     "ENEL.MI", "TRN.MI", "SRG.MI", "IG.MI", "A2A.MI", "HER.MI", "IRE.MI",
     "ENI.MI", "OVS.MI", "PRY.MI", "LDO.MI", "MONC.MI", "PST.MI", "TEN.MI"
 ]
 
-# Parametri Operativi Directa & Modello Grid Search
-CAPITALE_DEFAULT = 300.0     # Taglia standard per operazione (€)
-COMMISSIONE_DIRECTA = 3.0    # €1.50 acquisto + €1.50 vendita (Profilo Variabile)
+# Paniere Liquido Wall Street (NYSE / NASDAQ Top 30 Blue Chips & Tech)
+TICKERS_USA = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
+    "AVGO", "NFLX", "CRM", "ADBE", "ORCL", "INTC", "CSCO", "QCOM",
+    "JPM", "V", "MA", "BAC", "GS", "UNH", "LLY", "JNJ",
+    "WMT", "COST", "HD", "PG", "KO", "DIS"
+]
 
-RSI_MAX_TRIGGER = 36.0       # Soglia aurea compressione RSI(14)
-TP_TARGET_PCT = 0.042        # Take Profit fisso a +4.2%
-SL_ATR_MULT = 1.5            # Stop Loss iniziale a 1.5x ATR(14)
-BE_TRIGGER_PCT = 0.025       # Attivazione Breakeven al raggiungimento di +2.5%
-BE_LOCK_PCT = 0.018          # Livello Stop Breakeven a +1.8% (copre €3 fee + utile netto)
-MAX_GIORNI_HOLD = 15         # Time-Stop massimo (giorni di borsa)
+TICKERS = TICKERS_ITA + TICKERS_USA
+
+# Parametri Operativi Directa (Scalabili con /compra TICKER PREZZO CAPITALE)
+CAPITALE_DEFAULT_ITA = 300.0   # Taglia base test ITA (scalabile a 1000-2000€)
+CAPITALE_DEFAULT_USA = 1000.0  # Taglia consigliata USA (o personalizzabile in /compra)
+
+FEE_DIRECTA_ITA = 3.0          # €1.50 acquisto + €1.50 vendita (Borsa Italiana)
+FEE_DIRECTA_USA = 16.5         # $9.00 acquisto + $9.00 vendita su NYSE/NASDAQ (~€16.50)
+
+RSI_MAX_TRIGGER = 36.0         # Soglia aurea compressione RSI(14)
+TP_TARGET_PCT = 0.042          # Take Profit fisso a +4.2%
+SL_ATR_MULT = 1.5              # Stop Loss iniziale a 1.5x ATR(14)
+BE_TRIGGER_PCT = 0.025         # Attivazione Breakeven al raggiungimento di +2.5%
+BE_LOCK_PCT = 0.018            # Livello Stop Breakeven a +1.8%
+MAX_GIORNI_HOLD = 15           # Time-Stop massimo (giorni di borsa)
 
 # ==============================================================================
 # 2. WEB SERVER NATIVO KEEP-ALIVE ROBUSTO PER RENDER
@@ -61,10 +74,10 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot Quantitativo FTSE MIB Operativo.")
+        self.wfile.write(b"Bot Quantitativo Dual-Market (ITA + USA) Operativo.")
 
     def log_message(self, format, *args):
-        return  # Silenzia i log HTTP superflui
+        return
 
 def avvia_keep_alive():
     def run_server():
@@ -77,7 +90,7 @@ def avvia_keep_alive():
     t.start()
 
 # ==============================================================================
-# 3. GESTIONE DATABASE LOCALE (JSON)
+# 3. GESTIONE DATABASE LOCALE (JSON) & HELPER MERCATO
 # ==============================================================================
 def carica_json(percorso, default):
     if os.path.exists(percorso):
@@ -92,8 +105,12 @@ def salva_json(percorso, dati):
     with open(percorso, "w", encoding="utf-8") as f:
         json.dump(dati, f, indent=4, ensure_ascii=False)
 
+def is_mercato_ita(ticker_str):
+    t = ticker_str.upper().replace(".MI", "")
+    return f"{t}.MI" in TICKERS_ITA or ticker_str.upper().endswith(".MI")
+
 # ==============================================================================
-# 4. MOTORE DI ANALISI QUANTITATIVA
+# 4. MOTORE DI ANALISI QUANTITATIVA DUAL-MARKET (FTSE MIB & S&P 500)
 # ==============================================================================
 def calcola_indicatori_titolo(df):
     close = df["Close"]
@@ -117,26 +134,28 @@ def calcola_indicatori_titolo(df):
 
     return sma50, sma200, rsi, atr
 
-def verifica_regime_ftsemib():
-    """Controlla se l'indice FTSE MIB si trova sopra la SMA 200."""
+def verifica_regime_indice(simbolo):
+    """Controlla se l'indice di riferimento (FTSEMIB.MI o ^GSPC) staziona sopra la SMA 200."""
     try:
-        df_mib = yf.download("FTSEMIB.MI", period="1y", interval="1d", progress=False, auto_adjust=True)
-        if df_mib.empty or len(df_mib) < 200:
+        df_idx = yf.download(simbolo, period="1y", interval="1d", progress=False, auto_adjust=True)
+        if df_idx.empty or len(df_idx) < 200:
             return True, 0.0, 0.0, 0.0
-        if isinstance(df_mib.columns, pd.MultiIndex):
-            df_mib.columns = df_mib.columns.get_level_values(0)
+        if isinstance(df_idx.columns, pd.MultiIndex):
+            df_idx.columns = df_idx.columns.get_level_values(0)
 
-        close_mib = float(df_mib["Close"].iloc[-1])
-        sma200_mib = float(df_mib["Close"].rolling(200).mean().iloc[-1])
-        dist_pct = ((close_mib - sma200_mib) / sma200_mib) * 100.0
-        return (close_mib >= sma200_mib), close_mib, sma200_mib, dist_pct
+        close_val = float(df_idx["Close"].iloc[-1])
+        sma200_val = float(df_idx["Close"].rolling(200).mean().iloc[-1])
+        dist_pct = ((close_val - sma200_val) / sma200_val) * 100.0
+        return (close_val >= sma200_val), close_val, sma200_val, dist_pct
     except Exception as e:
-        logger.error(f"Errore verifica FTSE MIB: {e}")
+        logger.error(f"Errore verifica indice {simbolo}: {e}")
         return True, 0.0, 0.0, 0.0
 
 def esegui_scansione_mercato():
-    """Analizza tutti i titoli del paniere e restituisce il candidato TOP 1 e la classifica."""
-    mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_ftsemib()
+    """Analizza tutti i 54 titoli (ITA + USA) e restituisce i segnali TOP e la Watchlist."""
+    mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_indice("FTSEMIB.MI")
+    sp_ok, sp_p, sp_sma, sp_dist = verifica_regime_indice("^GSPC")
+
     candidati_sniper = []
     classifica_completa = []
 
@@ -159,6 +178,12 @@ def esegui_scansione_mercato():
             rsi_oggi = float(rsi.iloc[-1])
             atr_val = float(atr.iloc[-1])
 
+            is_ita = ticker.endswith(".MI")
+            mercato = "ITA" if is_ita else "USA"
+            valuta = "€" if is_ita else "$"
+            flag = "🇮🇹" if is_ita else "🇺🇸"
+            regime_ok = mib_ok if is_ita else sp_ok
+
             # Condizioni Strategia Certificata
             cond_trend = (p_prev > s50_prev > s200_prev)
             cond_rsi = (rsi_prev <= RSI_MAX_TRIGGER)
@@ -178,6 +203,9 @@ def esegui_scansione_mercato():
             info_titolo = {
                 "ticker": ticker.replace(".MI", ""),
                 "ticker_full": ticker,
+                "mercato": mercato,
+                "flag": flag,
+                "valuta": valuta,
                 "prezzo": p,
                 "rsi_ieri": rsi_prev,
                 "rsi_oggi": rsi_oggi,
@@ -192,7 +220,7 @@ def esegui_scansione_mercato():
             }
             classifica_completa.append(info_titolo)
 
-            if mib_ok and cond_trend and cond_rsi and cond_reversal:
+            if regime_ok and cond_trend and cond_rsi and cond_reversal:
                 candidati_sniper.append(info_titolo)
 
         except Exception as e:
@@ -202,10 +230,12 @@ def esegui_scansione_mercato():
     candidati_sniper.sort(key=lambda x: x["rsi_ieri"])
     classifica_completa.sort(key=lambda x: (-x["score"], x["rsi_ieri"]))
 
-    top1 = candidati_sniper[0] if candidati_sniper else None
-    regime_info = {"ok": mib_ok, "prezzo": mib_p, "sma200": mib_sma, "dist_pct": mib_dist}
+    regime_info = {
+        "ITA": {"ok": mib_ok, "prezzo": mib_p, "sma200": mib_sma, "dist_pct": mib_dist},
+        "USA": {"ok": sp_ok, "prezzo": sp_p, "sma200": sp_sma, "dist_pct": sp_dist},
+    }
 
-    return top1, classifica_completa, regime_info
+    return candidati_sniper, classifica_completa, regime_info
 
 # ==============================================================================
 # 5. COCKPIT OPERATIVO TELEGRAM A 3 FASI
@@ -213,9 +243,9 @@ def esegui_scansione_mercato():
 def menu_cockpit_tastiera():
     keyboard = [
         [
-            InlineKeyboardButton("🎯 1. Scan Top 1", callback_data="cmd_scan"),
+            InlineKeyboardButton("🎯 1. Scan Segnali", callback_data="cmd_scan"),
             InlineKeyboardButton("📊 Top 10 Watchlist", callback_data="cmd_top10"),
-            InlineKeyboardButton("🏛️ Regime MIB", callback_data="cmd_mercato"),
+            InlineKeyboardButton("🏛️ Regimi ITA/USA", callback_data="cmd_mercato"),
         ],
         [
             InlineKeyboardButton("💼 2. Portafoglio & Alert", callback_data="cmd_portafoglio"),
@@ -228,15 +258,15 @@ def menu_cockpit_tastiera():
     return InlineKeyboardMarkup(keyboard)
 
 TESTO_COCKPIT = (
-    "🧭 **COCKPIT OPERATIVO QUANTITATIVO — FTSE MIB**\n"
-    "*(Motore High Win-Rate 88.9% | PF 5.48 | Directa Variabile)*\n\n"
+    "🧭 **COCKPIT QUANTITATIVO — FTSE MIB 🇮🇹 & WALL STREET 🇺🇸**\n"
+    "*(Motore Pullback High Win-Rate | Directa SIM)*\n\n"
     "🟢 **FASE 1 — DECISIONE (Analisi & Segnali)**\n"
-    "• `/scan` — Cerca il singolo miglior segnale **TOP 1** di giornata\n"
-    "• `/top10` — Classifica dei 10 titoli più vicini al trigger\n"
-    "• `/mercato` — Verifica il filtro regime sul FTSE MIB (SMA 200)\n\n"
+    "• `/scan` — Cerca i migliori segnali **TOP** in Italia e USA\n"
+    "• `/top10` — Watchlist dei 10 titoli (ITA + USA) più vicini al trigger\n"
+    "• `/mercato` — Verifica il filtro regime su FTSE MIB e S&P 500 (SMA 200)\n\n"
     "🟡 **FASE 2 — GESTIONE (Operatività & Protezione)**\n"
     "• `/portafoglio` — Controlla posizioni, Breakeven (+2.5%) e uscite\n"
-    "• `/compra TICKER PREZZO [CAPITALE]` — Registra un ingresso\n"
+    "• `/compra TICKER PREZZO [CAPITALE]` — Registra un ingresso (es. `/compra NVDA 138.50 1500`)\n"
     "• `/vendi TICKER PREZZO` — Chiude la posizione e calcola il P&L netto\n\n"
     "🔵 **FASE 3 — ARCHIVIO (Performance & Audit)**\n"
     "• `/statistiche` — Bilancio netto, Win Rate, Profit Factor e storico\n"
@@ -249,93 +279,117 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def mercato_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    mib_ok, p, sma, dist = verifica_regime_ftsemib()
-    stato = "✅ **BULL MARKET (Operatività Consentita)**" if mib_ok else "⛔ **BEAR MARKET (Nuovi Ingressi Bloccati)**"
+    mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_indice("FTSEMIB.MI")
+    sp_ok, sp_p, sp_sma, sp_dist = verifica_regime_indice("^GSPC")
+
+    stato_ita = "✅ **BULL MARKET**" if mib_ok else "⛔ **BEAR MARKET (Bloccato)**"
+    stato_usa = "✅ **BULL MARKET**" if sp_ok else "⛔ **BEAR MARKET (Bloccato)**"
+
     testo = (
-        f"🏛️ **STATO REGIME DI MERCATO (FTSE MIB)**\n"
+        f"🏛️ **STATO REGIME DEI MERCATI (SMA 200)**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"Stato: {stato}\n"
-        f"Valore Attuale: **{p:,.0f} pt**\n"
-        f"Media SMA 200: **{sma:,.0f} pt**\n"
-        f"Distanza da SMA 200: **{dist:+.2f}%**\n"
+        f"🇮🇹 **FTSE MIB (Piazza Affari)**\n"
+        f"Stato: {stato_ita}\n"
+        f"Valore: **{mib_p:,.0f} pt** | SMA 200: **{mib_sma:,.0f} pt** (**{mib_dist:+.2f}%**)\n\n"
+        f"🇺🇸 **S&P 500 (Wall Street)**\n"
+        f"Stato: {stato_usa}\n"
+        f"Valore: **{sp_p:,.0f} pt** | SMA 200: **{sp_sma:,.0f} pt** (**{sp_dist:+.2f}%**)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Il modello opera solo quando il FTSE MIB staziona sopra la SMA 200.*"
+        f"💡 *Il bot abilita gli ingressi su ciascun mercato solo quando il rispettivo indice è sopra la SMA 200.*"
     )
     await msg.reply_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    wait_msg = await msg.reply_text("⏳ *Scansione quantitativa del paniere FTSE MIB in corso...*", parse_mode="Markdown")
+    wait_msg = await msg.reply_text("⏳ *Scansione quantitativa in corso su 54 titoli (FTSE MIB 🇮🇹 + Wall Street 🇺🇸)...*", parse_mode="Markdown")
 
     portafoglio = carica_json(PORTAFOGLIO_FILE, {})
-    top1, _, regime = esegui_scansione_mercato()
+    candidati, _, regime = esegui_scansione_mercato()
 
-    if not regime["ok"]:
+    ita_ok = regime["ITA"]["ok"]
+    usa_ok = regime["USA"]["ok"]
+
+    if not ita_ok and not usa_ok:
         testo = (
-            f"⛔ **SEMAFORO ROSSO — MERCATO SOTTO SMA 200**\n"
+            f"⛔ **SEMAFORO ROSSO GLOBALE — INDICI SOTTO SMA 200**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"FTSE MIB: **{regime['prezzo']:,.0f}** (SMA 200: **{regime['sma200']:,.0f}**)\n"
+            f"🇮🇹 FTSE MIB: **{regime['ITA']['prezzo']:,.0f}** (SMA 200: **{regime['ITA']['sma200']:,.0f}**)\n"
+            f"🇺🇸 S&P 500: **{regime['USA']['prezzo']:,.0f}** (SMA 200: **{regime['USA']['sma200']:,.0f}**)\n"
             f"Nessun segnale generato per protezione del capitale."
         )
         await wait_msg.edit_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
         return
 
-    if top1 is None:
+    if not candidati:
         testo = (
-            "✅ **Mercato Sano (FTSE MIB > SMA 200)**\n"
-            "🔍 **NESSUN SEGNALE 'TOP 1' OGGI**\n"
-            "━━━━━━━━━━━━━━━━━━━━\n"
-            "Nessun titolo presenta contemporaneamente:\n"
-            "1. Trend rialzista (`P > SMA50 > SMA200`)\n"
+            f"🏛️ **Regimi:** 🇮🇹 MIB {'✅' if ita_ok else '⛔'} | 🇺🇸 S&P 500 {'✅' if usa_ok else '⛔'}\n"
+            f"🔍 **NESSUN SEGNALE 'SCORE 100%' OGGI**\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"Nessun titolo su 54 (ITA + USA) presenta contemporaneamente:\n"
+            f"1. Trend rialzista (`P > SMA50 > SMA200`)\n"
             f"2. Ipervenduto marcato (`RSI_14 <= {RSI_MAX_TRIGGER}`)\n"
-            "3. Candela verde di inversione (`Close > Open` e `Close > Ieri`)\n\n"
-            "💡 *Disciplina Sniper: restare liquidi e risparmiare commissioni.*"
+            f"3. Candela verde di inversione (`Close > Open` e `Close > Ieri`)\n\n"
+            f"💡 *Disciplina Sniper: attendere l'allineamento perfetto. Controlla `/top10` per i titoli più vicini.*"
         )
         await wait_msg.edit_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
         return
 
-    avviso_pos = "\n⚠️ *Nota: Hai già una posizione attiva in portafoglio.*\n" if len(portafoglio) > 0 else ""
-    gain_netto = (CAPITALE_DEFAULT * TP_TARGET_PCT) - COMMISSIONE_DIRECTA
-    rischio_pct = ((top1["prezzo"] - top1["sl"]) / top1["prezzo"]) * 100.0
+    # Mostriamo fino ai 2 migliori segnali assoluti (es. Top ITA e Top USA)
+    blocchi_testo = [
+        f"🎯 **SEGNALI SNIPER RILEVATI ({len(candidati)} Titoli a Score 100%)**",
+        f"🏛️ Regimi: 🇮🇹 MIB {'✅' if ita_ok else '⛔'} | 🇺🇸 S&P 500 {'✅' if usa_ok else '⛔'}",
+        "━━━━━━━━━━━━━━━━━━━━"
+    ]
 
-    testo = (
-        f"🎯 **SEGNALE SNIPER 'TOP 1' RILEVATO!**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏆 Titolo: **{top1['ticker']}** (`{top1['ticker_full']}`)\n"
-        f"💶 Prezzo Ingresso: **€{top1['prezzo']:.4f}**\n"
-        f"📉 RSI(14) Ieri: **{top1['rsi_ieri']:.1f}** (Soglia <= {RSI_MAX_TRIGGER})\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🎯 **PIANO OPERATIVO SU DIRECTA (€{CAPITALE_DEFAULT:.0f}):**\n"
-        f"• **Take Profit (+{TP_TARGET_PCT*100:.1f}%):** `€{top1['tp']:.4f}` *(Netto: +€{gain_netto:.2f})*\n"
-        f"• **Stop Loss Iniziale (1.5x ATR):** `€{top1['sl']:.4f}` *(-{rischio_pct:.2f}%)*\n"
-        f"• **Trigger Breakeven (+2.5%):** a `€{top1['be_trigger']:.4f}` sposta lo Stop a `€{top1['be_lock']:.4f}`\n"
-        f"• **Time-Stop:** Max {MAX_GIORNI_HOLD} sedute\n"
-        f"{avviso_pos}\n"
-        f"📲 Per registrare l'eseguito digita:\n"
-        f"`/compra {top1['ticker']} {top1['prezzo']:.4f}`"
-    )
-    await wait_msg.edit_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
+    for top in candidati[:3]:
+        is_ita = (top["mercato"] == "ITA")
+        cap_sim = CAPITALE_DEFAULT_ITA if is_ita else CAPITALE_DEFAULT_USA
+        fee_sim = FEE_DIRECTA_ITA if is_ita else FEE_DIRECTA_USA
+        val = top["valuta"]
+
+        gain_netto = (cap_sim * TP_TARGET_PCT) - fee_sim
+        rischio_pct = ((top["prezzo"] - top["sl"]) / top["prezzo"]) * 100.0
+
+        blocco = (
+            f"🏆 {top['flag']} **{top['ticker']}** ({top['mercato']}) — Prezzo: **{val}{top['prezzo']:.3f}**\n"
+            f"📉 RSI(14) Ieri: **{top['rsi_ieri']:.1f}** 🔥 | Oggi: **{top['rsi_oggi']:.1f}**\n"
+            f"• **Take Profit (+{TP_TARGET_PCT*100:.1f}%):** `{val}{top['tp']:.3f}` *(Netto su €{cap_sim:.0f}: +€{gain_netto:.2f})*\n"
+            f"• **Stop Loss (1.5x ATR):** `{val}{top['sl']:.3f}` *(-{rischio_pct:.2f}%)*\n"
+            f"• **Breakeven (+2.5%):** a `{val}{top['be_trigger']:.3f}` ➔ Stop a `{val}{top['be_lock']:.3f}`\n"
+            f"📲 Registra: `/compra {top['ticker']} {top['prezzo']:.3f} {cap_sim:.0f}`\n"
+            f"━━━━━━━━━━━━━━━━━━━━"
+        )
+        blocchi_testo.append(blocco)
+
+    if len(portafoglio) > 0:
+        blocchi_testo.append(f"⚠️ *Nota: Hai già {len(portafoglio)} posizione/i attiva/e in portafoglio.*")
+
+    await wait_msg.edit_text("\n".join(blocchi_testo), parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
 async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    wait_msg = await msg.reply_text("⏳ *Elaborazione classifica Watchlist Top 10...*", parse_mode="Markdown")
+    wait_msg = await msg.reply_text("⏳ *Elaborazione Watchlist Top 12 (Piazza Affari + Wall Street)...*", parse_mode="Markdown")
 
     _, classifica, regime = esegui_scansione_mercato()
     if not classifica:
         await wait_msg.edit_text("❌ Impossibile scaricare i dati di mercato.", reply_markup=menu_cockpit_tastiera())
         return
 
+    ita_ok = regime["ITA"]["ok"]
+    usa_ok = regime["USA"]["ok"]
+
     righe = [
-        "📊 **WATCHLIST TOP 10 — PROSSIMITÀ AL TRIGGER**",
-        f"🏛️ Regime MIB: {'✅ Sano' if regime['ok'] else '⛔ Sotto SMA200'}",
+        "📊 **WATCHLIST TOP 12 — PROSSIMITÀ AL TRIGGER (ITA & USA)**",
+        f"🏛️ Regimi: 🇮🇹 MIB {'✅ Sano' if ita_ok else '⛔ Sotto SMA'} | 🇺🇸 S&P {'✅ Sano' if usa_ok else '⛔ Sotto SMA'}",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
 
-    for idx, item in enumerate(classifica[:10], start=1):
+    for idx, item in enumerate(classifica[:12], start=1):
         icona_t = "🟢" if item["trend_ok"] else "🔴"
         icona_r = "🔥" if item["rsi_ieri"] <= RSI_MAX_TRIGGER else "⏳"
+        val = item["valuta"]
         righe.append(
-            f"**{idx}. {item['ticker']}** — €{item['prezzo']:.3f} | Score: **{item['score']}%**\n"
+            f"**{idx}. {item['flag']} {item['ticker']}** — {val}{item['prezzo']:.2f} | Score: **{item['score']}%**\n"
             f"   Trend: {icona_t} | RSI Ieri: **{item['rsi_ieri']:.1f}** {icona_r} | Oggi: {item['rsi_oggi']:.1f}"
         )
 
@@ -347,17 +401,26 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "⚠️ **Uso corretto:** `/compra TICKER PREZZO [CAPITALE]`\nEsempio: `/compra ISP 3.852`",
+            "⚠️ **Uso corretto:** `/compra TICKER PREZZO [CAPITALE_EUR]`\n"
+            "Esempi:\n"
+            "• `/compra ISP 3.852 300`\n"
+            "• `/compra NVDA 138.50 1500`",
             parse_mode="Markdown",
         )
         return
 
-    ticker_clean = args[0].upper().replace(".MI", "")
-    ticker_full = f"{ticker_clean}.MI"
+    raw_ticker = args[0].upper()
+    is_ita = is_mercato_ita(raw_ticker)
+    ticker_clean = raw_ticker.replace(".MI", "")
+    ticker_full = f"{ticker_clean}.MI" if is_ita else ticker_clean
+    mercato = "ITA" if is_ita else "USA"
+    valuta = "€" if is_ita else "$"
+    flag = "🇮🇹" if is_ita else "🇺🇸"
+    cap_default = CAPITALE_DEFAULT_ITA if is_ita else CAPITALE_DEFAULT_USA
 
     try:
         prezzo_in = float(args[1].replace(",", "."))
-        capitale = float(args[2].replace(",", ".")) if len(args) >= 3 else CAPITALE_DEFAULT
+        capitale = float(args[2].replace(",", ".")) if len(args) >= 3 else cap_default
     except ValueError:
         await update.message.reply_text("❌ Inserisci valori numerici validi per prezzo e capitale.")
         return
@@ -381,6 +444,9 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     portafoglio = carica_json(PORTAFOGLIO_FILE, {})
     portafoglio[ticker_clean] = {
         "ticker_full": ticker_full,
+        "mercato": mercato,
+        "valuta": valuta,
+        "flag": flag,
         "prezzo_in": prezzo_in,
         "capitale": capitale,
         "tp": tp_price,
@@ -395,11 +461,11 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ **POSIZIONE REGISTRATA IN PORTAFOGLIO**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 Titolo: **{ticker_clean}**\n"
-        f"💶 Prezzo Carico: **€{prezzo_in:.4f}** (Size: €{capitale:.0f})\n"
-        f"🎯 Take Profit (+{TP_TARGET_PCT*100:.1f}%): **€{tp_price:.4f}**\n"
-        f"🛡️ Stop Loss (1.5x ATR): **€{sl_iniziale:.4f}**\n"
-        f"🔒 Trigger Breakeven (+2.5%): **€{be_trigger:.4f}** *(Stop sale a €{be_lock:.4f})*",
+        f"📌 Titolo: {flag} **{ticker_clean}** ({mercato})\n"
+        f"💶 Prezzo Carico: **{valuta}{prezzo_in:.4f}** (Taglia: **€{capitale:.0f}**)\n"
+        f"🎯 Take Profit (+{TP_TARGET_PCT*100:.1f}%): **{valuta}{tp_price:.4f}**\n"
+        f"🛡️ Stop Loss (1.5x ATR): **{valuta}{sl_iniziale:.4f}**\n"
+        f"🔒 Trigger Breakeven (+2.5%): **{valuta}{be_trigger:.4f}** *(Stop sale a {valuta}{be_lock:.4f})*",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
     )
@@ -416,13 +482,18 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    wait_msg = await msg.reply_text("⏳ *Aggiornamento quotazioni e verifica livelli Breakeven/Target...*", parse_mode="Markdown")
+    wait_msg = await msg.reply_text("⏳ *Aggiornamento quotazioni live ITA/USA e verifica livelli...*", parse_mode="Markdown")
     righe = ["💼 **MONITORAGGIO PORTAFOGLIO LIVE**", "━━━━━━━━━━━━━━━━━━━━"]
     modificato = False
 
     for ticker, pos in portafoglio.items():
         p_in = pos["prezzo_in"]
-        cap = pos.get("capitale", CAPITALE_DEFAULT)
+        mercato = pos.get("mercato", "ITA" if is_mercato_ita(pos["ticker_full"]) else "USA")
+        val = pos.get("valuta", "€" if mercato == "ITA" else "$")
+        flag = pos.get("flag", "🇮🇹" if mercato == "ITA" else "🇺🇸")
+        fee = FEE_DIRECTA_ITA if mercato == "ITA" else FEE_DIRECTA_USA
+        cap = pos.get("capitale", CAPITALE_DEFAULT_ITA if mercato == "ITA" else CAPITALE_DEFAULT_USA)
+
         p_attuale = p_in
         max_oggi = p_in
 
@@ -441,9 +512,9 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pos["be_attivo"] = True
             pos["sl"] = pos["be_lock"]
             modificato = True
-            avviso_azione = f"🚨 **SPOSTA STOP SU DIRECTA A €{pos['be_lock']:.4f} (+1.8% Protetto!)**"
+            avviso_azione = f"🚨 **SPOSTA STOP SU DIRECTA A {val}{pos['be_lock']:.4f} (+1.8% Protetto!)**"
         elif pos.get("be_attivo", False):
-            avviso_azione = f"🔒 *Breakeven Attivo (Stop protetto a €{pos['sl']:.4f})*"
+            avviso_azione = f"🔒 *Breakeven Attivo (Stop protetto a {val}{pos['sl']:.4f})*"
 
         if p_attuale >= pos["tp"]:
             avviso_azione = f"🎯 **TARGET RAGGIUNTO! Vendi (`/vendi {ticker} {p_attuale:.4f}`)**"
@@ -451,16 +522,16 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             avviso_azione = f"🛑 **STOP COLPITO! Chiudi (`/vendi {ticker} {p_attuale:.4f}`)**"
 
         var_pct = ((p_attuale - p_in) / p_in) * 100.0
-        pnl_netto = (((p_attuale - p_in) / p_in) * cap) - COMMISSIONE_DIRECTA
+        pnl_netto = (((p_attuale - p_in) / p_in) * cap) - fee
         giorni_trascorsi = (datetime.now() - datetime.strptime(pos["data_in"], "%Y-%m-%d")).days
 
         icona_pnl = "🟢" if pnl_netto >= 0 else "🔴"
         righe.append(
-            f"📌 **{ticker}** (In: €{p_in:.4f} | Ora: **€{p_attuale:.4f}**)\n"
+            f"📌 {flag} **{ticker}** [Size: €{cap:.0f}] (In: {val}{p_in:.3f} | Ora: **{val}{p_attuale:.3f}**)\n"
             f"   {icona_pnl} Var: **{var_pct:+.2f}%** | P&L Netto Fee: **€{pnl_netto:+.2f}**\n"
-            f"   🎯 TP: `€{pos['tp']:.4f}` | 🛡️ SL: `€{pos['sl']:.4f}`\n"
+            f"   🎯 TP: `{val}{pos['tp']:.3f}` | 🛡️ SL: `{val}{pos['sl']:.3f}`\n"
             f"   ⏱️ Giorni: {giorni_trascorsi}/{MAX_GIORNI_HOLD} | {avviso_azione}\n"
-            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.4f}`\n"
+            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.3f}`\n"
         )
 
     if modificato:
@@ -472,7 +543,7 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "⚠️ **Uso corretto:** `/vendi TICKER PREZZO_USCITA`\nEsempio: `/vendi ISP 4.015`",
+            "⚠️ **Uso corretto:** `/vendi TICKER PREZZO_USCITA`\nEsempio: `/vendi NVDA 144.30`",
             parse_mode="Markdown",
         )
         return
@@ -492,20 +563,28 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pos = portafoglio.pop(ticker_clean)
     salva_json(PORTAFOGLIO_FILE, portafoglio)
 
+    mercato = pos.get("mercato", "ITA" if is_mercato_ita(pos["ticker_full"]) else "USA")
+    val = pos.get("valuta", "€" if mercato == "ITA" else "$")
+    flag = pos.get("flag", "🇮🇹" if mercato == "ITA" else "🇺🇸")
+    fee = FEE_DIRECTA_ITA if mercato == "ITA" else FEE_DIRECTA_USA
+
     p_in = pos["prezzo_in"]
-    cap = pos.get("capitale", CAPITALE_DEFAULT)
+    cap = pos.get("capitale", CAPITALE_DEFAULT_ITA if mercato == "ITA" else CAPITALE_DEFAULT_USA)
     var_pct = ((prezzo_out - p_in) / p_in) * 100.0
     pnl_lordo = ((prezzo_out - p_in) / p_in) * cap
-    pnl_netto = pnl_lordo - COMMISSIONE_DIRECTA
+    pnl_netto = pnl_lordo - fee
     esito = "WIN" if pnl_netto > 0 else "LOSS"
 
     storico = carica_json(STORICO_FILE, [])
     storico.append({
         "ticker": ticker_clean,
+        "mercato": mercato,
         "data_in": pos["data_in"],
         "data_out": datetime.now().strftime("%Y-%m-%d"),
         "prezzo_in": p_in,
         "prezzo_out": prezzo_out,
+        "capitale": cap,
+        "fee": fee,
         "var_pct": round(var_pct, 2),
         "pnl_lordo": round(pnl_lordo, 2),
         "pnl_netto": round(pnl_netto, 2),
@@ -517,10 +596,10 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"{emoji}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 Titolo: **{ticker_clean}**\n"
-        f"💶 Carico: €{p_in:.4f} ➔ Uscita: **€{prezzo_out:.4f}** ({var_pct:+.2f}%)\n"
+        f"📌 Titolo: {flag} **{ticker_clean}** ({mercato} — Size: €{cap:.0f})\n"
+        f"💶 Carico: {val}{p_in:.4f} ➔ Uscita: **{val}{prezzo_out:.4f}** ({var_pct:+.2f}%)\n"
         f"💰 P&L Lordo: €{pnl_lordo:+.2f}\n"
-        f"🏦 Commissioni Directa: -€{COMMISSIONE_DIRECTA:.2f}\n"
+        f"🏦 Commissioni Directa ({mercato}): -€{fee:.2f}\n"
         f"🏆 **P&L Netto Consolidato: €{pnl_netto:+.2f}**",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
@@ -545,7 +624,7 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     wr = (len(vinte) / tot_trades) * 100.0
     pnl_tot = df_s["pnl_netto"].sum()
-    fee_tot = tot_trades * COMMISSIONE_DIRECTA
+    fee_tot = df_s["fee"].sum() if "fee" in df_s.columns else tot_trades * FEE_DIRECTA_ITA
     sum_win = vinte["pnl_netto"].sum() if not vinte.empty else 0.0
     sum_loss = abs(perse["pnl_netto"].sum()) if not perse.empty else 0.0
     pf = (sum_win / sum_loss) if sum_loss > 0 else 99.9
@@ -557,13 +636,13 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
 
     testo = (
-        f"📈 **STATISTICHE CONSOLIDATE (NETTO DIRECTA)**\n"
+        f"📈 **STATISTICHE CONSOLIDATE (FTSE MIB & WALL STREET)**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🔢 Operazioni Chiuse: **{tot_trades}** (✅ {len(vinte)} | ❌ {len(perse)})\n"
         f"🎯 **Win Rate Netto Reale:** **{wr:.1f}%** *(Target modello: 88.9%)*\n"
         f"💰 **P&L Netto Consolidato:** **€{pnl_tot:+.2f}**\n"
         f"⚖️ **Profit Factor Netto:** **{pf:.2f}** *(Target modello: 5.48)*\n"
-        f"🏦 Commissioni Directa Pagate: €{fee_tot:.2f}\n"
+        f"🏦 Commissioni Directa Totali: €{fee_tot:.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🕒 **ULTIME OPERAZIONI:**\n" + "\n".join(righe_ultimi)
     )
@@ -610,7 +689,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot Quantitativo FTSE MIB in ascolto su Telegram...")
+    logger.info("Bot Quantitativo Dual-Market (ITA + USA) in ascolto su Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
