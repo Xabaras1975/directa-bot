@@ -2,6 +2,7 @@ import os
 import json
 import logging
 import warnings
+import asyncio
 from datetime import datetime
 from threading import Thread
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -110,29 +111,55 @@ def is_mercato_ita(ticker_str):
     return f"{t}.MI" in TICKERS_ITA or ticker_str.upper().endswith(".MI")
 
 # ==============================================================================
-# 4. MOTORE DI ANALISI QUANTITATIVA DUAL-MARKET (FTSE MIB & S&P 500)
+# 4. MOTORE DI ANALISI QUANTITATIVA & CONFLUENZE (FIBO, BB, VOL, MACD)
 # ==============================================================================
-def calcola_indicatori_titolo(df):
-    close = df["Close"]
-    high = df["High"]
-    low = df["Low"]
+def prepara_indicatori_completi(df):
+    d = df.copy()
+    c = d["Close"]
+    h = d["High"]
+    l = d["Low"]
+    v = d["Volume"] if "Volume" in d.columns else pd.Series(1.0, index=d.index)
 
-    sma50 = close.rolling(50).mean()
-    sma200 = close.rolling(200).mean()
+    # 1. SMA 50 & 200
+    d["sma50"] = c.rolling(50).mean()
+    d["sma200"] = c.rolling(200).mean()
 
-    delta = close.diff()
+    # 2. RSI(14)
+    delta = c.diff()
     g = delta.where(delta > 0, 0.0).rolling(14).mean()
-    l = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
-    rs = g / l.replace(0, np.nan)
-    rsi = (100 - (100 / (1 + rs))).fillna(50)
+    loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
+    rs = g / loss.replace(0, np.nan)
+    d["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
 
+    # 3. ATR(14)
     tr = pd.concat(
-        [high - low, (high - close.shift(1)).abs(), (low - close.shift(1)).abs()],
-        axis=1,
+        [h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1
     ).max(axis=1)
-    atr = tr.rolling(14).mean()
+    d["atr"] = tr.rolling(14).mean()
 
-    return sma50, sma200, rsi, atr
+    # 4. Fibonacci Retracement (Swing 60 sedute)
+    roll_max = h.rolling(60).max().shift(1)
+    roll_min = l.rolling(60).min().shift(1)
+    rng = (roll_max - roll_min).replace(0, np.nan)
+    d["fib_retr"] = ((roll_max - c.shift(1)) / rng) * 100.0
+
+    # 5. Bollinger Bands (20, 2)
+    sma20 = c.rolling(20).mean()
+    std20 = c.rolling(20).std()
+    d["bb_lower"] = sma20 - 2.0 * std20
+
+    # 6. Relative Volume (RVOL 20gg)
+    vol_sma20 = v.rolling(20).mean().replace(0, np.nan)
+    d["rvol"] = (v / vol_sma20).fillna(1.0)
+
+    # 7. MACD Histogram (12, 26, 9)
+    ema12 = c.ewm(span=12, adjust=False).mean()
+    ema26 = c.ewm(span=26, adjust=False).mean()
+    macd_line = ema12 - ema26
+    sig_line = macd_line.ewm(span=9, adjust=False).mean()
+    d["macd_hist"] = macd_line - sig_line
+
+    return d
 
 def verifica_regime_indice(simbolo):
     """Controlla se l'indice di riferimento (FTSEMIB.MI o ^GSPC) staziona sopra la SMA 200."""
@@ -152,31 +179,36 @@ def verifica_regime_indice(simbolo):
         return True, 0.0, 0.0, 0.0
 
 def esegui_scansione_mercato():
-    """Analizza tutti i 54 titoli (ITA + USA) e restituisce i segnali TOP e la Watchlist."""
+    """Analizza tutti i 54 titoli (ITA + USA) con download batch veloce e calcola Score + Confluenze."""
     mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_indice("FTSEMIB.MI")
     sp_ok, sp_p, sp_sma, sp_dist = verifica_regime_indice("^GSPC")
 
     candidati_sniper = []
     classifica_completa = []
 
+    raw_batch = yf.download(TICKERS, period="1y", interval="1d", group_by="ticker", progress=False, auto_adjust=True)
+
     for ticker in TICKERS:
         try:
-            d = yf.download(ticker, period="1y", interval="1d", progress=False, auto_adjust=True)
-            if d.empty or len(d) < 205:
+            d_raw = raw_batch[ticker].dropna(how="all") if isinstance(raw_batch.columns, pd.MultiIndex) else raw_batch
+            if d_raw.empty or len(d_raw) < 205:
                 continue
-            if isinstance(d.columns, pd.MultiIndex):
-                d.columns = d.columns.get_level_values(0)
 
-            sma50, sma200, rsi, atr = calcola_indicatori_titolo(d)
+            d = prepara_indicatori_completi(d_raw).dropna()
+            if len(d) < 5:
+                continue
 
-            p = float(d["Close"].iloc[-1])
-            op = float(d["Open"].iloc[-1])
-            p_prev = float(d["Close"].iloc[-2])
-            s50_prev = float(sma50.iloc[-2])
-            s200_prev = float(sma200.iloc[-2])
-            rsi_prev = float(rsi.iloc[-2])
-            rsi_oggi = float(rsi.iloc[-1])
-            atr_val = float(atr.iloc[-1])
+            row_oggi = d.iloc[-1]
+            row_ieri = d.iloc[-2]
+
+            p = float(row_oggi["Close"])
+            op = float(row_oggi["Open"])
+            p_prev = float(row_ieri["Close"])
+            s50_prev = float(row_ieri["sma50"])
+            s200_prev = float(row_ieri["sma200"])
+            rsi_prev = float(row_ieri["rsi"])
+            rsi_oggi = float(row_oggi["rsi"])
+            atr_val = float(row_oggi["atr"])
 
             is_ita = ticker.endswith(".MI")
             mercato = "ITA" if is_ita else "USA"
@@ -184,7 +216,7 @@ def esegui_scansione_mercato():
             flag = "🇮🇹" if is_ita else "🇺🇸"
             regime_ok = mib_ok if is_ita else sp_ok
 
-            # Condizioni Strategia Certificata
+            # 3 Pilastri Core (Portano lo Score a 100%)
             cond_trend = (p_prev > s50_prev > s200_prev)
             cond_rsi = (rsi_prev <= RSI_MAX_TRIGGER)
             cond_reversal = (p > op and p > p_prev)
@@ -194,6 +226,20 @@ def esegui_scansione_mercato():
             if rsi_prev <= 42.0: score += 20
             if cond_rsi: score += 20
             if cond_reversal: score += 20
+
+            # 4 Indicatori di Confluenza Avanzata
+            f_fibo = (30.0 <= float(row_ieri["fib_retr"]) <= 68.0)
+            f_bb = (float(row_ieri["Low"]) <= float(row_ieri["bb_lower"]) * 1.008) or (float(row_oggi["Low"]) <= float(row_oggi["bb_lower"]) * 1.008)
+            f_vol = (float(row_oggi["rvol"]) >= 1.0) or (float(row_ieri["rvol"]) >= 1.15)
+            f_macd = (float(row_oggi["macd_hist"]) > float(row_ieri["macd_hist"]))
+            n_conf = int(f_fibo) + int(f_bb) + int(f_vol) + int(f_macd)
+
+            badges = []
+            if f_fibo: badges.append(f"📐Fibo({row_ieri['fib_retr']:.0f}%)")
+            if f_bb: badges.append("🎸BB")
+            if f_vol: badges.append(f"📊Vol({row_oggi['rvol']:.1f}x)")
+            if f_macd: badges.append("📈MACD")
+            conf_str = " ".join(badges) if badges else "Nessuna"
 
             tp_price = p * (1.0 + TP_TARGET_PCT)
             sl_price = p - (SL_ATR_MULT * atr_val)
@@ -212,6 +258,8 @@ def esegui_scansione_mercato():
                 "trend_ok": cond_trend,
                 "reversal_ok": cond_reversal,
                 "score": score,
+                "n_conf": n_conf,
+                "conf_str": conf_str,
                 "tp": tp_price,
                 "sl": sl_price,
                 "be_trigger": be_trigger,
@@ -227,8 +275,8 @@ def esegui_scansione_mercato():
             logger.error(f"Errore scansione {ticker}: {e}")
             continue
 
-    candidati_sniper.sort(key=lambda x: x["rsi_ieri"])
-    classifica_completa.sort(key=lambda x: (-x["score"], x["rsi_ieri"]))
+    candidati_sniper.sort(key=lambda x: (-x["n_conf"], x["rsi_ieri"]))
+    classifica_completa.sort(key=lambda x: (-x["score"], -x["n_conf"], x["rsi_ieri"]))
 
     regime_info = {
         "ITA": {"ok": mib_ok, "prezzo": mib_p, "sma200": mib_sma, "dist_pct": mib_dist},
@@ -237,50 +285,176 @@ def esegui_scansione_mercato():
 
     return candidati_sniper, classifica_completa, regime_info
 
+def calcola_backtest_storico():
+    """Esegue il backtest storico comparativo sugli ultimi 2 anni per tutti i 54 titoli (ITA + USA)."""
+    raw_batch = yf.download(TICKERS, period="2y", interval="1d", group_by="ticker", progress=False, auto_adjust=True)
+    cap_test = 1000.0
+    tutti_i_segnali = []
+
+    for ticker in TICKERS:
+        try:
+            df_raw = raw_batch[ticker].dropna(how="all") if isinstance(raw_batch.columns, pd.MultiIndex) else raw_batch
+            if df_raw.empty or len(df_raw) < 220:
+                continue
+
+            d = prepara_indicatori_completi(df_raw).dropna()
+            is_ita = ticker.endswith(".MI")
+            fee = FEE_DIRECTA_ITA if is_ita else FEE_DIRECTA_USA
+
+            n_rows = len(d)
+            i = 2
+            while i < n_rows - MAX_GIORNI_HOLD - 1:
+                row_oggi = d.iloc[i]
+                row_ieri = d.iloc[i - 1]
+
+                cond_trend = (row_ieri["Close"] > row_ieri["sma50"] > row_ieri["sma200"])
+                cond_rsi = (row_ieri["rsi"] <= RSI_MAX_TRIGGER)
+                cond_rev = (row_oggi["Close"] > row_oggi["Open"]) and (row_oggi["Close"] > row_ieri["Close"])
+
+                if cond_trend and cond_rsi and cond_rev:
+                    f_fibo = (30.0 <= row_ieri["fib_retr"] <= 68.0)
+                    f_bb = (row_ieri["Low"] <= row_ieri["bb_lower"] * 1.008) or (row_oggi["Low"] <= row_oggi["bb_lower"] * 1.008)
+                    f_vol = (row_oggi["rvol"] >= 1.0) or (row_ieri["rvol"] >= 1.15)
+                    f_macd = (row_oggi["macd_hist"] > row_ieri["macd_hist"])
+                    n_conf = int(f_fibo) + int(f_bb) + int(f_vol) + int(f_macd)
+
+                    p_in = float(row_oggi["Close"])
+                    atr_in = float(row_oggi["atr"])
+                    tp = p_in * (1.0 + TP_TARGET_PCT)
+                    sl = p_in - (SL_ATR_MULT * atr_in)
+                    be_trig = p_in * (1.0 + BE_TRIGGER_PCT)
+                    be_lock = p_in * (1.0 + BE_LOCK_PCT)
+
+                    be_attivo = False
+                    p_out = p_in
+                    giorni_hold = MAX_GIORNI_HOLD
+
+                    for g_idx in range(1, MAX_GIORNI_HOLD + 1):
+                        bar = d.iloc[i + g_idx]
+                        if bar["Low"] <= sl:
+                            p_out = sl
+                            giorni_hold = g_idx
+                            break
+                        if bar["High"] >= tp:
+                            p_out = tp
+                            giorni_hold = g_idx
+                            break
+                        if not be_attivo and bar["High"] >= be_trig:
+                            be_attivo = True
+                            sl = be_lock
+                        if g_idx == MAX_GIORNI_HOLD:
+                            p_out = float(bar["Close"])
+
+                    pnl_lordo = ((p_out - p_in) / p_in) * cap_test
+                    pnl_netto = pnl_lordo - fee
+
+                    tutti_i_segnali.append({
+                        "pnl_netto": pnl_netto,
+                        "win": 1 if pnl_netto > 0 else 0,
+                        "fibo": f_fibo,
+                        "bb": f_bb,
+                        "vol": f_vol,
+                        "macd": f_macd,
+                        "confluenze": n_conf,
+                    })
+                    i += giorni_hold
+                else:
+                    i += 1
+        except Exception:
+            continue
+
+    df_res = pd.DataFrame(tutti_i_segnali)
+    if df_res.empty:
+        return "❌ Nessun dato sufficiente per il backtest."
+
+    def fmt_riga(titolo, sub):
+        if len(sub) == 0:
+            return f"• **{titolo}**: 0 trade"
+        n_t = len(sub)
+        wr = sub["win"].mean() * 100.0
+        pnl = sub["pnl_netto"].sum()
+        vinte = sub[sub["pnl_netto"] > 0]["pnl_netto"].sum()
+        perse = abs(sub[sub["pnl_netto"] <= 0]["pnl_netto"].sum())
+        pf = (vinte / perse) if perse > 0 else 99.9
+        return (
+            f"🔹 **{titolo}**\n"
+            f"   Trade: `{n_t}` | WR: **{wr:.1f}%** | PF: `{pf:.2f}` | Netto: **€{pnl:+.0f}**"
+        )
+
+    righe = [
+        "🧪 **AUDIT BACKTEST REALE (ULTIMI 2 ANNI — 54 TITOLI ITA+USA)**",
+        "*(Simulazione Taglia €1.000 al netto Commissioni Directa)*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        fmt_riga("1. SOLO BASE (Trend + RSI<=36 + Verde)", df_res),
+        fmt_riga("2. Base + 📐 FIBONACCI (30-68%)", df_res[df_res["fibo"]]),
+        fmt_riga("3. Base + 🎸 BOLLINGER (Touch Inf.)", df_res[df_res["bb"]]),
+        fmt_riga("4. Base + 📊 VOLUMI (RVOL >= 1x)", df_res[df_res["vol"]]),
+        fmt_riga("5. Base + 📈 MACD (Hist Tick-Up)", df_res[df_res["macd"]]),
+        "━━━━━━━━━━━━━━━━━━━━",
+        fmt_riga("🔥 CONFLUENCE >= 2 FILTRI EXTRA", df_res[df_res["confluenze"] >= 2]),
+        fmt_riga("💎 SNIPER ELITE >= 3 FILTRI EXTRA", df_res[df_res["confluenze"] >= 3]),
+        "━━━━━━━━━━━━━━━━━━━━",
+        "💡 *I filtri extra sono già integrati nelle schede `/scan` e `/top10`!*"
+    ]
+    return "\n".join(righe)
+
 # ==============================================================================
-# 5. COCKPIT OPERATIVO TELEGRAM A 3 FASI
+# 5. COCKPIT OPERATIVO TELEGRAM A 4 FASI
 # ==============================================================================
 def menu_cockpit_tastiera():
     keyboard = [
         [
             InlineKeyboardButton("🎯 1. Scan Segnali", callback_data="cmd_scan"),
-            InlineKeyboardButton("📊 Top 10 Watchlist", callback_data="cmd_top10"),
+            InlineKeyboardButton("📊 Top 12 Watchlist", callback_data="cmd_top10"),
+        ],
+        [
             InlineKeyboardButton("🏛️ Regimi ITA/USA", callback_data="cmd_mercato"),
+            InlineKeyboardButton("💼 2. Portafoglio", callback_data="cmd_portafoglio"),
         ],
         [
-            InlineKeyboardButton("💼 2. Portafoglio & Alert", callback_data="cmd_portafoglio"),
+            InlineKeyboardButton("📈 3. Statistiche", callback_data="cmd_statistiche"),
+            InlineKeyboardButton("🧪 4. Backtest 2Y", callback_data="cmd_backtest"),
         ],
         [
-            InlineKeyboardButton("📈 3. Statistiche & P&L", callback_data="cmd_statistiche"),
-            InlineKeyboardButton("🧭 Cockpit", callback_data="cmd_start"),
+            InlineKeyboardButton("🧭 Menu Cockpit", callback_data="cmd_start"),
         ],
     ]
     return InlineKeyboardMarkup(keyboard)
 
 TESTO_COCKPIT = (
     "🧭 **COCKPIT QUANTITATIVO — FTSE MIB 🇮🇹 & WALL STREET 🇺🇸**\n"
-    "*(Motore Pullback High Win-Rate | Directa SIM)*\n\n"
+    "*(Motore Pullback + Confluenze Fibo/BB/Vol/MACD | Directa)*\n\n"
     "🟢 **FASE 1 — DECISIONE (Analisi & Segnali)**\n"
-    "• `/scan` — Cerca i migliori segnali **TOP** in Italia e USA\n"
-    "• `/top10` — Watchlist dei 10 titoli (ITA + USA) più vicini al trigger\n"
-    "• `/mercato` — Verifica il filtro regime su FTSE MIB e S&P 500 (SMA 200)\n\n"
+    "• `/scan` — Cerca i segnali **Score 100%** + Confluenze\n"
+    "• `/top10` — Watchlist dei 12 titoli più vicini al trigger\n"
+    "• `/mercato` — Filtro regime su FTSE MIB e S&P 500 (SMA 200)\n\n"
     "🟡 **FASE 2 — GESTIONE (Operatività & Protezione)**\n"
     "• `/portafoglio` — Controlla posizioni, Breakeven (+2.5%) e uscite\n"
-    "• `/compra TICKER PREZZO [CAPITALE]` — Registra un ingresso (es. `/compra NVDA 138.50 1500`)\n"
-    "• `/vendi TICKER PREZZO` — Chiude la posizione e calcola il P&L netto\n\n"
-    "🔵 **FASE 3 — ARCHIVIO (Performance & Audit)**\n"
-    "• `/statistiche` — Bilancio netto, Win Rate, Profit Factor e storico\n"
-    "• `/reset` — Azzera il portafoglio attivo"
+    "• `/compra TICKER PREZZO [CAPITALE]` — Registra ingresso\n"
+    "• `/vendi TICKER PREZZO` — Chiude posizione e calcola P&L netto\n\n"
+    "🔵 **FASE 3 — ARCHIVIO & BACKTEST STORICO**\n"
+    "• `/statistiche` — Bilancio netto, Win Rate e Profit Factor\n"
+    "• `/backtest` — Esegue il Backtest sugli ultimi 2 anni direttamente qui!"
 )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     await msg.reply_text(TESTO_COCKPIT, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
+async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message or update.callback_query.message
+    wait_msg = await msg.reply_text(
+        "⏳ *Avvio Backtest Comparativo Reale (ultimi 2 anni su 54 titoli ITA + USA)...*\n"
+        "*(Attendere circa 15-20 secondi per il download e il calcolo)*",
+        parse_mode="Markdown"
+    )
+    report = await asyncio.to_thread(calcola_backtest_storico)
+    await wait_msg.edit_text(report, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
+
 async def mercato_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_indice("FTSEMIB.MI")
-    sp_ok, sp_p, sp_sma, sp_dist = verifica_regime_indice("^GSPC")
+    mib_ok, mib_p, mib_sma, mib_dist = await asyncio.to_thread(verifica_regime_indice, "FTSEMIB.MI")
+    sp_ok, sp_p, sp_sma, sp_dist = await asyncio.to_thread(verifica_regime_indice, "^GSPC")
 
     stato_ita = "✅ **BULL MARKET**" if mib_ok else "⛔ **BEAR MARKET (Bloccato)**"
     stato_usa = "✅ **BULL MARKET**" if sp_ok else "⛔ **BEAR MARKET (Bloccato)**"
@@ -304,7 +478,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wait_msg = await msg.reply_text("⏳ *Scansione quantitativa in corso su 54 titoli (FTSE MIB 🇮🇹 + Wall Street 🇺🇸)...*", parse_mode="Markdown")
 
     portafoglio = carica_json(PORTAFOGLIO_FILE, {})
-    candidati, _, regime = esegui_scansione_mercato()
+    candidati, _, regime = await asyncio.to_thread(esegui_scansione_mercato)
 
     ita_ok = regime["ITA"]["ok"]
     usa_ok = regime["USA"]["ok"]
@@ -334,7 +508,6 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await wait_msg.edit_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
         return
 
-    # Mostriamo fino ai 2 migliori segnali assoluti (es. Top ITA e Top USA)
     blocchi_testo = [
         f"🎯 **SEGNALI SNIPER RILEVATI ({len(candidati)} Titoli a Score 100%)**",
         f"🏛️ Regimi: 🇮🇹 MIB {'✅' if ita_ok else '⛔'} | 🇺🇸 S&P 500 {'✅' if usa_ok else '⛔'}",
@@ -352,7 +525,8 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         blocco = (
             f"🏆 {top['flag']} **{top['ticker']}** ({top['mercato']}) — Prezzo: **{val}{top['prezzo']:.3f}**\n"
-            f"📉 RSI(14) Ieri: **{top['rsi_ieri']:.1f}** 🔥 | Oggi: **{top['rsi_oggi']:.1f}**\n"
+            f"📉 RSI Ieri: **{top['rsi_ieri']:.1f}** 🔥 | Oggi: **{top['rsi_oggi']:.1f}**\n"
+            f"🧩 Confluenze ({top['n_conf']}/4): `{top['conf_str']}`\n"
             f"• **Take Profit (+{TP_TARGET_PCT*100:.1f}%):** `{val}{top['tp']:.3f}` *(Netto su €{cap_sim:.0f}: +€{gain_netto:.2f})*\n"
             f"• **Stop Loss (1.5x ATR):** `{val}{top['sl']:.3f}` *(-{rischio_pct:.2f}%)*\n"
             f"• **Breakeven (+2.5%):** a `{val}{top['be_trigger']:.3f}` ➔ Stop a `{val}{top['be_lock']:.3f}`\n"
@@ -370,7 +544,7 @@ async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     wait_msg = await msg.reply_text("⏳ *Elaborazione Watchlist Top 12 (Piazza Affari + Wall Street)...*", parse_mode="Markdown")
 
-    _, classifica, regime = esegui_scansione_mercato()
+    _, classifica, regime = await asyncio.to_thread(esegui_scansione_mercato)
     if not classifica:
         await wait_msg.edit_text("❌ Impossibile scaricare i dati di mercato.", reply_markup=menu_cockpit_tastiera())
         return
@@ -390,7 +564,8 @@ async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = item["valuta"]
         righe.append(
             f"**{idx}. {item['flag']} {item['ticker']}** — {val}{item['prezzo']:.2f} | Score: **{item['score']}%**\n"
-            f"   Trend: {icona_t} | RSI Ieri: **{item['rsi_ieri']:.1f}** {icona_r} | Oggi: {item['rsi_oggi']:.1f}"
+            f"   Trend: {icona_t} | RSI Ieri: **{item['rsi_ieri']:.1f}** {icona_r} | Oggi: {item['rsi_oggi']:.1f}\n"
+            f"   🧩 Extra ({item['n_conf']}/4): `{item['conf_str']}`"
         )
 
     righe.append("━━━━━━━━━━━━━━━━━━━━")
@@ -427,12 +602,12 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     atr_val = prezzo_in * 0.022
     try:
-        d = yf.download(ticker_full, period="3mo", interval="1d", progress=False, auto_adjust=True)
+        d = await asyncio.to_thread(yf.download, ticker_full, period="3mo", interval="1d", progress=False, auto_adjust=True)
         if not d.empty and len(d) >= 20:
             if isinstance(d.columns, pd.MultiIndex):
                 d.columns = d.columns.get_level_values(0)
-            _, _, _, atr_s = calcola_indicatori_titolo(d)
-            atr_val = float(atr_s.iloc[-1])
+            d_ind = prepara_indicatori_completi(d)
+            atr_val = float(d_ind["atr"].iloc[-1])
     except Exception:
         pass
 
@@ -498,7 +673,7 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         max_oggi = p_in
 
         try:
-            d = yf.download(pos["ticker_full"], period="5d", interval="1d", progress=False, auto_adjust=True)
+            d = await asyncio.to_thread(yf.download, pos["ticker_full"], period="5d", interval="1d", progress=False, auto_adjust=True)
             if not d.empty:
                 if isinstance(d.columns, pd.MultiIndex):
                     d.columns = d.columns.get_level_values(0)
@@ -666,6 +841,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif data == "cmd_mercato": await mercato_cmd(update, context)
     elif data == "cmd_portafoglio": await portafoglio_cmd(update, context)
     elif data == "cmd_statistiche": await statistiche_cmd(update, context)
+    elif data == "cmd_backtest": await backtest_cmd(update, context)
     elif data == "cmd_start": await start_cmd(update, context)
 
 # ==============================================================================
@@ -686,6 +862,7 @@ def main():
     app.add_handler(CommandHandler("portafoglio", portafoglio_cmd))
     app.add_handler(CommandHandler("vendi", vendi_cmd))
     app.add_handler(CommandHandler("statistiche", statistiche_cmd))
+    app.add_handler(CommandHandler("backtest", backtest_cmd))
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
