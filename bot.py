@@ -25,11 +25,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Lock globale per garantire download sequenziali puliti su yfinance
+# Lock per garantire che yfinance non mescoli mai i prezzi tra due chiamate
 YF_LOCK = Lock()
 
 # ==============================================================================
-# 1. CONFIGURAZIONE E PARAMETRI QUANTITATIVI CALIBRATI (ITA vs USA)
+# 1. CONFIGURAZIONE E PARAMETRI QUANTITATIVI (ITA + WALL STREET + GEM)
 # ==============================================================================
 TOKEN = "8645159870:AAHEj0C5ffCoU_6a5ujTNXaWkYvAdqDmOe4"
 PORT = int(os.environ.get("PORT", 10000))
@@ -37,7 +37,7 @@ PORT = int(os.environ.get("PORT", 10000))
 PORTAFOGLIO_FILE = "portafoglio.json"
 STORICO_FILE = "storico_trades.json"
 
-# Paniere Liquido Piazza Affari (24 Titoli)
+# 24 Titoli Liquidi Piazza Affari (FTSE MIB / Mid Cap)
 TICKERS_ITA = [
     "STLAM.MI", "RACE.MI", "MAIRE.MI", "WBD.MI", "SFER.MI",
     "ISP.MI", "UCG.MI", "BPE.MI", "BMED.MI", "G.MI",
@@ -45,7 +45,7 @@ TICKERS_ITA = [
     "ENI.MI", "OVS.MI", "PRY.MI", "LDO.MI", "MONC.MI", "PST.MI", "TEN.MI"
 ]
 
-# Paniere Liquido Wall Street (30 Titoli)
+# 30 Titoli Liquidi Wall Street (NYSE / NASDAQ)
 TICKERS_USA = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
     "AVGO", "NFLX", "CRM", "ADBE", "ORCL", "INTC", "CSCO", "QCOM",
@@ -53,47 +53,43 @@ TICKERS_USA = [
     "WMT", "COST", "HD", "PG", "KO", "DIS"
 ]
 
+# Sottoinsieme di Big Tech USA negoziabili anche su Borsa Italiana GEM (a €3 di fee)
+BIG_TECH_GEM = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD", "NFLX", "INTC"}
+
 TICKERS = TICKERS_ITA + TICKERS_USA
 
-# Taglie Default e Commissioni Reali Directa
-CAPITALE_DEFAULT_ITA = 1000.0  # Personalizzabile in /compra
-CAPITALE_DEFAULT_USA = 1000.0  # Personalizzabile in /compra
-
-FEE_DIRECTA_ITA = 3.0          # €1.50 + €1.50 Borsa Italiana
-FEE_DIRECTA_USA = 16.5         # $9.00 + $9.00 Wall Street (~€16.50)
-
-# Parametri Tecnici Core
+# Parametri Core
 RSI_MAX_TRIGGER = 36.0
 SL_ATR_MULT = 1.5
 MAX_GIORNI_HOLD = 15
 
-# Target Calibrati per Mercato (per assorbire commissioni e volatilità specifica)
+# Parametri Specifici per Mercato (Ripristinato Breakeven rapido +2.5% anche su USA con Size €2.000)
 PARAMS_MERCATO = {
     "ITA": {
         "tp_pct": 0.042,       # +4.2% Take Profit Italia
-        "be_trig": 0.025,      # +2.5% Attivazione Breakeven Italia
-        "be_lock": 0.018,      # +1.8% Stop Protetto Italia (+€15 netti su €1.000)
-        "fee": FEE_DIRECTA_ITA,
-        "cap_def": CAPITALE_DEFAULT_ITA,
+        "be_trig": 0.025,      # +2.5% Attivazione Breakeven
+        "be_lock": 0.018,      # +1.8% Stop Protetto (+€15.00 netti su €1.000)
+        "fee": 3.0,            # €1.50 + €1.50 su Borsa Italiana
+        "cap_def": 1000.0,     # Taglia standard Italia €1.000 (personalizzabile)
     },
     "USA": {
-        "tp_pct": 0.060,       # +6.0% Take Profit USA (+€43.50 netti su €1.000)
-        "be_trig": 0.035,      # +3.5% Attivazione Breakeven USA
-        "be_lock": 0.028,      # +2.8% Stop Protetto USA (+€11.50 netti su €1.000)
-        "fee": FEE_DIRECTA_USA,
-        "cap_def": CAPITALE_DEFAULT_USA,
+        "tp_pct": 0.045,       # +4.5% Take Profit USA (+€73.50 netti su €2.000)
+        "be_trig": 0.025,      # +2.5% Attivazione Breakeven rapida (evita che +3% diventi Stop Loss!)
+        "be_lock": 0.018,      # +1.8% Stop Protetto (+€19.50 netti su €2.000 pagate le fee USA)
+        "fee": 16.5,           # $9.00 + $9.00 su NYSE/NASDAQ (~€16.50)
+        "cap_def": 2000.0,     # Taglia consigliata Wall Street €2.000 per abbattere le fee fisse
     }
 }
 
 # ==============================================================================
-# 2. WEB SERVER NATIVO KEEP-ALIVE ROBUSTO PER RENDER
+# 2. WEB SERVER NATIVO KEEP-ALIVE PER RENDER
 # ==============================================================================
 class KeepAliveHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot Quantitativo Dual-Market (ITA + USA) Calibrato Operativo.")
+        self.wfile.write(b"Bot Quantitativo Dual-Market (ITA + USA) Operativo.")
 
     def log_message(self, format, *args):
         return
@@ -109,7 +105,7 @@ def avvia_keep_alive():
     t.start()
 
 # ==============================================================================
-# 3. GESTIONE DATABASE LOCALE (JSON) & HELPER DOWNLOAD SICURO
+# 3. GESTIONE DATABASE LOCALE (JSON) & DOWNLOAD PREZZI REALI
 # ==============================================================================
 def carica_json(percorso, default):
     if os.path.exists(percorso):
@@ -129,7 +125,7 @@ def is_mercato_ita(ticker_str):
     return f"{t}.MI" in TICKERS_ITA or ticker_str.upper().endswith(".MI")
 
 def scarica_ticker_sicuro(simbolo, periodo="1y"):
-    """Scarica un singolo ticker con auto_adjust=False (Prezzi Reali di Borsa)."""
+    """Scarica un singolo ticker con auto_adjust=False (Prezzi Reali di Borsa identici a Directa)."""
     with YF_LOCK:
         try:
             t_obj = yf.Ticker(simbolo)
@@ -206,7 +202,7 @@ def verifica_regime_indice(simbolo):
     return (close_val >= sma200_val), close_val, sma200_val, dist_pct
 
 def esegui_scansione_mercato():
-    """Analizza tutti i 54 titoli (ITA + USA) con parametri differenziati e 3 Confluenze Pure."""
+    """Analizza tutti i 54 titoli (ITA + USA) separando i segnali freschi da quelli già partiti."""
     mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_indice("FTSEMIB.MI")
     sp_ok, sp_p, sp_sma, sp_dist = verifica_regime_indice("^GSPC")
 
@@ -248,10 +244,14 @@ def esegui_scansione_mercato():
             regime_ok = mib_ok if is_ita else sp_ok
             prm = PARAMS_MERCATO[mercato]
 
-            # 3 Pilastri Core (Score 100%)
+            # 3 Pilastri Core
             cond_trend = (p_prev > s50_prev > s200_prev)
             cond_rsi = (rsi_prev <= RSI_MAX_TRIGGER)
             cond_reversal = (p > op and p > p_prev)
+
+            # Controllo di freschezza del segnale (quanto è già salito oggi rispetto a ieri)
+            rimbalzo_oggi_pct = ((p - p_prev) / p_prev) * 100.0
+            segnale_fresco = (rimbalzo_oggi_pct <= 2.2) and (rsi_oggi <= 44.0)
 
             score = 0
             if cond_trend: score += 40
@@ -259,7 +259,7 @@ def esegui_scansione_mercato():
             if cond_rsi: score += 20
             if cond_reversal: score += 20
 
-            # 3 Confluenze Certificate dal Backtest (Fibo + Bollinger + MACD Tick-Up)
+            # 3 Confluenze Pure (Fibonacci, Bollinger, MACD Tick-Up)
             f_fibo = (30.0 <= float(row_ieri["fib_retr"]) <= 68.0)
             f_bb = (float(row_ieri["Low"]) <= float(row_ieri["bb_lower"]) * 1.008) or (float(row_oggi["Low"]) <= float(row_oggi["bb_lower"]) * 1.008)
             f_macd = (float(row_oggi["macd_hist"]) > float(row_ieri["macd_hist"]))
@@ -283,6 +283,8 @@ def esegui_scansione_mercato():
                 "flag": flag,
                 "valuta": valuta,
                 "prezzo": p,
+                "rimbalzo_oggi_pct": rimbalzo_oggi_pct,
+                "fresco": segnale_fresco,
                 "rsi_ieri": rsi_prev,
                 "rsi_oggi": rsi_oggi,
                 "trend_ok": cond_trend,
@@ -308,7 +310,7 @@ def esegui_scansione_mercato():
             logger.error(f"Errore scansione {ticker}: {e}")
             continue
 
-    candidati_sniper.sort(key=lambda x: (-x["n_conf"], x["rsi_ieri"]))
+    candidati_sniper.sort(key=lambda x: (-int(x["fresco"]), -x["n_conf"], x["rsi_ieri"]))
     classifica_completa.sort(key=lambda x: (-x["score"], -x["n_conf"], x["rsi_ieri"]))
 
     regime_info = {
@@ -319,7 +321,7 @@ def esegui_scansione_mercato():
     return candidati_sniper, classifica_completa, regime_info
 
 def calcola_backtest_storico():
-    """Backtest comparativo sugli ultimi 2 anni con Filtro Regime SMA 200 storico e Target Calibrati ITA/USA."""
+    """Backtest completo sugli ultimi 2 anni: mostra Italia, Wall Street (Size €2.000) e GEM (€3 fee)."""
     df_mib = scarica_ticker_sicuro("FTSEMIB.MI", periodo="2y")
     df_sp = scarica_ticker_sicuro("^GSPC", periodo="2y")
 
@@ -332,7 +334,6 @@ def calcola_backtest_storico():
             progress=False, auto_adjust=False, threads=False
         )
 
-    cap_test = 1000.0
     tutti_i_segnali = []
 
     for ticker in TICKERS:
@@ -345,7 +346,8 @@ def calcola_backtest_storico():
             is_ita = ticker.endswith(".MI")
             mercato = "ITA" if is_ita else "USA"
             prm = PARAMS_MERCATO[mercato]
-            fee = prm["fee"]
+            cap_test = prm["cap_def"]     # €1.000 per ITA, €2.000 per USA
+            fee = prm["fee"]              # €3.00 per ITA, €16.50 per USA
             bull_map = mib_bull_series if is_ita else sp_bull_series
 
             n_rows = len(d)
@@ -355,7 +357,6 @@ def calcola_backtest_storico():
                 row_ieri = d.iloc[i - 1]
                 data_curr = d.index[i]
 
-                # Verifica Regime SMA 200 dell'indice in quella data storica
                 regime_storico_ok = True
                 if not bull_map.empty and data_curr in bull_map.index:
                     regime_storico_ok = bool(bull_map.loc[data_curr])
@@ -397,13 +398,17 @@ def calcola_backtest_storico():
                         if g_idx == MAX_GIORNI_HOLD:
                             p_out = float(bar["Close"])
 
-                    pnl_lordo = ((p_out - p_in) / p_in) * cap_test
-                    pnl_netto = pnl_lordo - fee
+                    ret_pct = (p_out - p_in) / p_in
+                    pnl_netto = (ret_pct * cap_test) - fee
+                    # Simulazione parallela: stesso trade USA se eseguito su GEM Milano (Size €1.000, Fee €3.00)
+                    pnl_gem_1k = (ret_pct * 1000.0) - 3.0
 
                     tutti_i_segnali.append({
                         "mercato": mercato,
                         "pnl_netto": pnl_netto,
                         "win": 1 if pnl_netto > 0 else 0,
+                        "pnl_gem": pnl_gem_1k,
+                        "win_gem": 1 if pnl_gem_1k > 0 else 0,
                         "fibo": f_fibo,
                         "bb": f_bb,
                         "macd": f_macd,
@@ -419,40 +424,37 @@ def calcola_backtest_storico():
     if df_res.empty:
         return "❌ Nessun dato sufficiente per il backtest."
 
-    def fmt_riga(titolo, sub):
+    def fmt_riga(titolo, sub, col_pnl="pnl_netto", col_win="win"):
         if len(sub) == 0:
             return f"• **{titolo}**: 0 trade"
         n_t = len(sub)
-        wr = sub["win"].mean() * 100.0
-        pnl = sub["pnl_netto"].sum()
-        vinte = sub[sub["pnl_netto"] > 0]["pnl_netto"].sum()
-        perse = abs(sub[sub["pnl_netto"] <= 0]["pnl_netto"].sum())
+        wr = sub[col_win].mean() * 100.0
+        pnl = sub[col_pnl].sum()
+        vinte = sub[sub[col_pnl] > 0][col_pnl].sum()
+        perse = abs(sub[sub[col_pnl] <= 0][col_pnl].sum())
         pf = (vinte / perse) if perse > 0 else 99.9
         return (
             f"🔹 **{titolo}**\n"
             f"   Trade: `{n_t}` | WR: **{wr:.1f}%** | PF: `{pf:.2f}` | Netto: **€{pnl:+.0f}**"
         )
 
-    df_conf1 = df_res[df_res["confluenze"] >= 1]
-    df_conf2 = df_res[df_res["confluenze"] >= 2]
-    df_ita = df_conf1[df_conf1["mercato"] == "ITA"]
-    df_usa = df_conf1[df_conf1["mercato"] == "USA"]
+    df_ita = df_res[df_res["mercato"] == "ITA"]
+    df_usa_all = df_res[df_res["mercato"] == "USA"]
+    df_usa_conf2 = df_usa_all[df_usa_all["confluenze"] >= 2]
+    df_tot_ottimale = pd.concat([df_ita[df_ita["confluenze"] >= 1], df_usa_conf2])
 
     righe = [
-        "🧪 **AUDIT BACKTEST CALIBRATO (2Y — FILTRO SMA200 ATTIVO)**",
-        "*(Taglia €1.000 | TP ITA +4.2% / USA +6.0% | Netto Fee Directa)*",
+        "🧪 **AUDIT BACKTEST DEFINITIVO (2Y — SMA200 + BE +2.5%)**",
+        "*(ITA: Size €1.000 Fee €3 | USA: Size €2.000 Fee €16.50, TP +4.5%)*",
         "━━━━━━━━━━━━━━━━━━━━",
-        fmt_riga("1. SOLO BASE (3 Pilastri)", df_res),
-        fmt_riga("2. Base + 📐 FIBONACCI (30-68%)", df_res[df_res["fibo"]]),
-        fmt_riga("3. Base + 🎸 BOLLINGER (Touch Inf.)", df_res[df_res["bb"]]),
-        fmt_riga("4. Base + 📈 MACD (Hist Tick-Up)", df_res[df_res["macd"]]),
+        fmt_riga("1. 🇮🇹 PIAZZA AFFARI (Tutti i segnali)", df_ita),
+        fmt_riga("2. 🇮🇹 PIAZZA AFFARI (Confluence >= 1)", df_ita[df_ita["confluenze"] >= 1]),
         "━━━━━━━━━━━━━━━━━━━━",
-        fmt_riga("✅ CONFLUENCE >= 1 FILTRO (Fibo/BB/MACD)", df_conf1),
-        fmt_riga("🔥 SNIPER >= 2 FILTRI (Gold Setup)", df_conf2),
+        fmt_riga("3. 🇺🇸 WALL STREET (Tutti - Size €2.000)", df_usa_all),
+        fmt_riga("4. 🇺🇸 WALL STREET SNIPER (>= 2 Confluenze)", df_usa_conf2),
+        fmt_riga("5. 💡 USA comprati su GEM Milano (Size €1k, Fee €3)", df_usa_conf2, "pnl_gem", "win_gem"),
         "━━━━━━━━━━━━━━━━━━━━",
-        "🌍 **SPACCATO PER MERCATO (Confluence >= 1):**",
-        fmt_riga("🇮🇹 PIAZZA AFFARI (Fee €3.00)", df_ita),
-        fmt_riga("🇺🇸 WALL STREET (Fee €16.50 | TP +6%)", df_usa),
+        fmt_riga("🏆 PORTAFOGLIO COMBINATO (ITA>=1 + USA>=2)", df_tot_ottimale),
     ]
     return "\n".join(righe)
 
@@ -481,20 +483,21 @@ def menu_cockpit_tastiera():
 
 TESTO_COCKPIT = (
     "🧭 **COCKPIT QUANTITATIVO — FTSE MIB 🇮🇹 & WALL STREET 🇺🇸**\n"
-    "*(Motore Calibrato Dual-Target | 3 Confluenze Pure: Fibo, BB, MACD)*\n\n"
-    "🟢 **FASE 1 — DECISIONE (Analisi & Segnali)**\n"
-    "• `/scan` — Cerca i segnali **Score 100%** + Confluenze (3/3)\n"
+    "*(3 Confluenze Pure: Fibo, BB, MACD | Breakeven Rapido +2.5%)*\n\n"
+    "🟢 **FASE 1 — DECISIONE & ORARI IDEALI**\n"
+    "• `/scan` — Cerca i segnali **Score 100%** e ne verifica la freschezza\n"
     "• `/top10` — Watchlist dei 12 titoli più vicini al trigger\n"
-    "• `/mercato` — Filtro regime su FTSE MIB e S&P 500 (SMA 200)\n\n"
-    "🟡 **FASE 2 — GESTIONE (Target Differenziati ITA / USA)**\n"
-    "• 🇮🇹 **ITA:** TP `+4.2%` | Breakeven a `+2.5%` (Stop `+1.8%`)\n"
-    "• 🇺🇸 **USA:** TP `+6.0%` | Breakeven a `+3.5%` (Stop `+2.8%`)\n"
+    "• `/mercato` — Filtro regime su FTSE MIB e S&P 500 (SMA 200)\n"
+    "• ⏰ *Orari:* Italia/GEM `09:00–17:30` | Wall Street `15:30–22:00`\n\n"
+    "🟡 **FASE 2 — REGOLE DI PROFITTO (ITA vs USA)**\n"
+    "• 🇮🇹 **Italia (Fee €3):** Size `€1.000` | TP `+4.2%` | BE a `+2.5%` (Stop `+1.8%`)\n"
+    "• 🇺🇸 **USA (Fee €16.50):** Size `€2.000` (o su GEM `.MI` a €3 fee) | TP `+4.5%` | BE a `+2.5%`\n"
     "• `/portafoglio` — Monitora posizioni, Breakeven e uscite\n"
     "• `/compra TICKER PREZZO [CAPITALE]` — Registra ingresso\n"
     "• `/vendi TICKER PREZZO` — Chiude posizione e calcola P&L netto\n\n"
     "🔵 **FASE 3 — ARCHIVIO & BACKTEST STORICO**\n"
     "• `/statistiche` — Bilancio netto, Win Rate e Profit Factor\n"
-    "• `/backtest` — Backtest calibrato a 2 anni (con spaccato ITA vs USA)"
+    "• `/backtest` — Backtest 2Y separato per Italia, USA (Size €2k) e GEM"
 )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,7 +507,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     wait_msg = await msg.reply_text(
-        "⏳ *Avvio Backtest Calibrato (2 Anni su 54 titoli ITA + USA con filtro SMA 200 e nuovi target)...*\n"
+        "⏳ *Avvio Backtest Definitivo (2 Anni su 54 titoli ITA + USA con Breakeven +2.5% e spaccato GEM)...*\n"
         "*(Attendere circa 20 secondi)*",
         parse_mode="Markdown"
     )
@@ -522,10 +525,10 @@ async def mercato_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     testo = (
         f"🏛️ **STATO REGIME DEI MERCATI (SMA 200)**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"🇮🇹 **FTSE MIB (Piazza Affari)**\n"
+        f"🇮🇹 **FTSE MIB (Piazza Affari — 09:00/17:30)**\n"
         f"Stato: {stato_ita}\n"
         f"Valore: **{mib_p:,.0f} pt** | SMA 200: **{mib_sma:,.0f} pt** (**{mib_dist:+.2f}%**)\n\n"
-        f"🇺🇸 **S&P 500 (Wall Street)**\n"
+        f"🇺🇸 **S&P 500 (Wall Street — 15:30/22:00)**\n"
         f"Stato: {stato_usa}\n"
         f"Valore: **{sp_p:,.0f} pt** | SMA 200: **{sp_sma:,.0f} pt** (**{sp_dist:+.2f}%**)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -561,7 +564,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"━━━━━━━━━━━━━━━━━━━━\n"
             f"Nessun titolo su 54 (ITA + USA) presenta contemporaneamente:\n"
             f"1. Trend rialzista (`P > SMA50 > SMA200`)\n"
-            f"2. Ipervenduto marcato (`RSI_14 <= {RSI_MAX_TRIGGER}`)\n"
+            f"2. Ipervenduto marcato (`RSI Ieri <= {RSI_MAX_TRIGGER}`)\n"
             f"3. Candela verde di inversione (`Close > Open` e `Close > Ieri`)\n\n"
             f"💡 *Disciplina Sniper: attendere l'allineamento perfetto. Controlla `/top10` per i titoli più vicini.*"
         )
@@ -569,7 +572,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     blocchi_testo = [
-        f"🎯 **SEGNALI SNIPER RILEVATI ({len(candidati)} Titoli a Score 100%)**",
+        f"🎯 **SEGNALI RILEVATI ({len(candidati)} Titoli a Score 100%)**",
         f"🏛️ Regimi: 🇮🇹 MIB {'✅' if ita_ok else '⛔'} | 🇺🇸 S&P 500 {'✅' if usa_ok else '⛔'}",
         "━━━━━━━━━━━━━━━━━━━━"
     ]
@@ -584,14 +587,25 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gain_netto = (cap_sim * top["tp_pct"]) - fee_sim
         rischio_pct = ((top["prezzo"] - top["sl"]) / top["prezzo"]) * 100.0
 
+        # Indicatore di Attendibilità / Timing Live (risponde esattamente al caso UNH!)
+        if top["fresco"]:
+            stato_timing = f"🟢 **SEGNALE FRESCO ATTIVO** *(Oggi {top['rimbalzo_oggi_pct']:+.2f}%, RSI {top['rsi_oggi']:.1f})*"
+        else:
+            stato_timing = f"⚠️ **GIÀ PARTITO / IN CORSA** *(Oggi {top['rimbalzo_oggi_pct']:+.2f}%, RSI salito a {top['rsi_oggi']:.1f} — Non inseguire!)*"
+
+        nota_gem = ""
+        if mercato == "USA" and top["ticker"] in BIG_TECH_GEM:
+            nota_gem = f"\n💡 *Disponibile anche su Borsa Italiana GEM (`{top['ticker']}.MI`) in Euro con soli €3 di commissione!*"
+
         blocco = (
-            f"🏆 {top['flag']} **{top['ticker']}** ({mercato}) — Prezzo: **{val}{top['prezzo']:.3f}**\n"
+            f"🏆 {top['flag']} **{top['ticker']}** ({mercato}) — Prezzo: **{val}{top['prezzo']:.2f}**\n"
+            f"⏱️ Timing: {stato_timing}\n"
             f"📉 RSI Ieri: **{top['rsi_ieri']:.1f}** 🔥 | Oggi: **{top['rsi_oggi']:.1f}**\n"
             f"🧩 Confluenze ({top['n_conf']}/3): `{top['conf_str']}`\n"
-            f"• **Take Profit (+{top['tp_pct']*100:.1f}%):** `{val}{top['tp']:.3f}` *(Netto su €{cap_sim:.0f}: +€{gain_netto:.2f})*\n"
-            f"• **Stop Loss (1.5x ATR):** `{val}{top['sl']:.3f}` *(-{rischio_pct:.2f}%)*\n"
-            f"• **Breakeven (+{top['be_trig_pct']*100:.1f}%):** a `{val}{top['be_trigger']:.3f}` ➔ Stop a `{val}{top['be_lock']:.3f}` (+{top['be_lock_pct']*100:.1f}%)\n"
-            f"📲 Registra: `/compra {top['ticker']} {top['prezzo']:.3f} {cap_sim:.0f}`\n"
+            f"• **Take Profit (+{top['tp_pct']*100:.1f}%):** `{val}{top['tp']:.2f}` *(Netto su €{cap_sim:.0f}: +€{gain_netto:.2f})*\n"
+            f"• **Stop Loss (1.5x ATR):** `{val}{top['sl']:.2f}` *(-{rischio_pct:.2f}%)*\n"
+            f"• **Breakeven (+{top['be_trig_pct']*100:.1f}%):** a `{val}{top['be_trigger']:.2f}` ➔ Stop a `{val}{top['be_lock']:.2f}` (+{top['be_lock_pct']*100:.1f}%){nota_gem}\n"
+            f"📲 Registra: `/compra {top['ticker']} {top['prezzo']:.2f} {cap_sim:.0f}`\n"
             f"━━━━━━━━━━━━━━━━━━━━"
         )
         blocchi_testo.append(blocco)
@@ -623,14 +637,18 @@ async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         icona_t = "🟢" if item["trend_ok"] else "🔴"
         icona_r = "🔥" if item["rsi_ieri"] <= RSI_MAX_TRIGGER else "⏳"
         val = item["valuta"]
+        avviso_100 = ""
+        if item["score"] == 100:
+            avviso_100 = " 🟢*(Fresco)*" if item["fresco"] else " ⚠️*(Già rimbalzato)*"
+
         righe.append(
-            f"**{idx}. {item['flag']} {item['ticker']}** — {val}{item['prezzo']:.2f} | Score: **{item['score']}%**\n"
+            f"**{idx}. {item['flag']} {item['ticker']}** — {val}{item['prezzo']:.2f} | Score: **{item['score']}%**{avviso_100}\n"
             f"   Trend: {icona_t} | RSI Ieri: **{item['rsi_ieri']:.1f}** {icona_r} | Oggi: {item['rsi_oggi']:.1f}\n"
             f"   🧩 Extra ({item['n_conf']}/3): `{item['conf_str']}`"
         )
 
     righe.append("━━━━━━━━━━━━━━━━━━━━")
-    righe.append("💡 *Il segnale scatta a Score 100% (Trend 🟢 + RSI <= 36 🔥 + Candela Verde).*")
+    righe.append("💡 *Il segnale è eseguibile a Score 100% 🟢(Fresco) prima che l'RSI Oggi superi 44.*")
     await wait_msg.edit_text("\n".join(righe), parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
 async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -639,8 +657,9 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️ **Uso corretto:** `/compra TICKER PREZZO [CAPITALE_EUR]`\n"
             "Esempi:\n"
-            "• `/compra ENI 24.75 1000`\n"
-            "• `/compra UNH 397.60 1500`",
+            "• `/compra ENI 24.75 1000` (Italia — Fee €3)\n"
+            "• `/compra UNH 405.12 2000` (USA — Fee €16.50)\n"
+            "• `/compra AAPL.MI 320.50 1000` (USA su GEM Milano — Fee €3)",
             parse_mode="Markdown",
         )
         return
@@ -698,7 +717,7 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         f"✅ **POSIZIONE REGISTRATA IN PORTAFOGLIO**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📌 Titolo: {flag} **{ticker_clean}** ({mercato})\n"
+        f"📌 Titolo: {flag} **{ticker_clean}** ({mercato} — Fee €{prm['fee']:.2f})\n"
         f"💶 Prezzo Carico: **{valuta}{prezzo_in:.4f}** (Taglia: **€{capitale:.0f}**)\n"
         f"🎯 Take Profit (+{prm['tp_pct']*100:.1f}%): **{valuta}{tp_price:.4f}**\n"
         f"🛡️ Stop Loss (1.5x ATR): **{valuta}{sl_iniziale:.4f}**\n"
@@ -764,11 +783,11 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         icona_pnl = "🟢" if pnl_netto >= 0 else "🔴"
         righe.append(
-            f"📌 {flag} **{ticker}** [Size: €{cap:.0f}] (In: {val}{p_in:.3f} | Ora: **{val}{p_attuale:.3f}**)\n"
+            f"📌 {flag} **{ticker}** [Size: €{cap:.0f}] (In: {val}{p_in:.2f} | Ora: **{val}{p_attuale:.2f}**)\n"
             f"   {icona_pnl} Var: **{var_pct:+.2f}%** | P&L Netto Fee: **€{pnl_netto:+.2f}**\n"
-            f"   🎯 TP: `{val}{pos['tp']:.3f}` | 🛡️ SL: `{val}{pos['sl']:.3f}`\n"
+            f"   🎯 TP: `{val}{pos['tp']:.2f}` | 🛡️ SL: `{val}{pos['sl']:.2f}`\n"
             f"   ⏱️ Giorni: {giorni_trascorsi}/{MAX_GIORNI_HOLD} | {avviso_azione}\n"
-            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.3f}`\n"
+            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.2f}`\n"
         )
 
     if modificato:
@@ -780,7 +799,7 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "⚠️ **Uso corretto:** `/vendi TICKER PREZZO_USCITA`\nEsempio: `/vendi UNH 421.50`",
+            "⚠️ **Uso corretto:** `/vendi TICKER PREZZO_USCITA`\nEsempio: `/vendi UNH 423.35`",
             parse_mode="Markdown",
         )
         return
@@ -838,7 +857,7 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💶 Carico: {val}{p_in:.4f} ➔ Uscita: **{val}{prezzo_out:.4f}** ({var_pct:+.2f}%)\n"
         f"💰 P&L Lordo: €{pnl_lordo:+.2f}\n"
         f"🏦 Commissioni Directa ({mercato}): -€{fee:.2f}\n"
-        f"🏆 **P&L Netto Consolidato: €{pnl_netto:+.2f}**",
+        f"🏆 **P&L Netto Consolidato (Esente 26% fino a €302.35 minus): €{pnl_netto:+.2f}**",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
     )
@@ -862,10 +881,12 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     wr = (len(vinte) / tot_trades) * 100.0
     pnl_tot = df_s["pnl_netto"].sum()
-    fee_tot = df_s["fee"].sum() if "fee" in df_s.columns else tot_trades * FEE_DIRECTA_ITA
+    fee_tot = df_s["fee"].sum() if "fee" in df_s.columns else tot_trades * 3.0
     sum_win = vinte["pnl_netto"].sum() if not vinte.empty else 0.0
     sum_loss = abs(perse["pnl_netto"].sum()) if not perse.empty else 0.0
     pf = (sum_win / sum_loss) if sum_loss > 0 else 99.9
+
+    minus_residua = max(0.0, 302.35 - max(0.0, pnl_tot))
 
     ultimi = storico[-5:]
     righe_ultimi = [
@@ -881,6 +902,7 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💰 **P&L Netto Consolidato:** **€{pnl_tot:+.2f}**\n"
         f"⚖️ **Profit Factor Netto:** **{pf:.2f}**\n"
         f"🏦 Commissioni Directa Totali: €{fee_tot:.2f}\n"
+        f"🛡️ Zainetto Minusvalenze Residuo: **€{minus_residua:.2f}**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"🕒 **ULTIME OPERAZIONI:**\n" + "\n".join(righe_ultimi)
     )
@@ -929,7 +951,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot Quantitativo Dual-Market Calibrato in ascolto su Telegram...")
+    logger.info("Bot Quantitativo Dual-Market Definitivo in ascolto su Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
