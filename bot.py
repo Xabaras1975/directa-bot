@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 YF_LOCK = Lock()
 
 # ==============================================================================
-# 1. CONFIGURAZIONE E PARAMETRI QUANTITATIVI (ITA + WALL STREET + GEM)
+# 1. CONFIGURAZIONE E PANIERE ESTESO (36 ITALIA + 30 WALL STREET)
 # ==============================================================================
 TOKEN = "8645159870:AAHEj0C5ffCoU_6a5ujTNXaWkYvAdqDmOe4"
 PORT = int(os.environ.get("PORT", 10000))
@@ -36,12 +36,19 @@ PORT = int(os.environ.get("PORT", 10000))
 PORTAFOGLIO_FILE = "portafoglio.json"
 STORICO_FILE = "storico_trades.json"
 
-# 24 Titoli Liquidi Piazza Affari (FTSE MIB / Mid Cap)
+# 36 Titoli Liquidi Piazza Affari (FTSE MIB Completo & Top Mid Cap - Fee €3.00)
 TICKERS_ITA = [
-    "STLAM.MI", "RACE.MI", "MAIRE.MI", "WBD.MI", "SFER.MI",
-    "ISP.MI", "UCG.MI", "BPE.MI", "BMED.MI", "G.MI",
-    "ENEL.MI", "TRN.MI", "SRG.MI", "IG.MI", "A2A.MI", "HER.MI", "IRE.MI",
-    "ENI.MI", "OVS.MI", "PRY.MI", "LDO.MI", "MONC.MI", "PST.MI", "TEN.MI"
+    # Banche, Assicurazioni & Finanza
+    "ISP.MI", "UCG.MI", "BAMI.MI", "BPE.MI", "BMED.MI", "FBK.MI",
+    "MB.MI", "BMPS.MI", "BPSO.MI", "AZM.MI", "G.MI", "PST.MI",
+    # Energia & Utility
+    "ENI.MI", "ENEL.MI", "TRN.MI", "SRG.MI", "IG.MI", "A2A.MI",
+    "HER.MI", "IRE.MI", "TEN.MI",
+    # Industria, Tech, Auto & Infrastrutture
+    "RACE.MI", "STLAM.MI", "STMMI.MI", "PRY.MI", "LDO.MI", "BZU.MI",
+    "MAIRE.MI", "WBD.MI",
+    # Lusso, Salute & Largo Consumo
+    "MONC.MI", "BC.MI", "SFER.MI", "OVS.MI", "CPR.MI", "REC.MI", "AMP.MI"
 ]
 
 # 30 Titoli Liquidi Wall Street (NYSE / NASDAQ)
@@ -84,7 +91,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot Quantitativo Dual-Market Operativo.")
+        self.wfile.write(b"Bot Quantitativo 66 Titoli (36 ITA + 30 USA) Operativo.")
 
     def log_message(self, format, *args):
         return
@@ -118,7 +125,7 @@ PORTAFOGLIO_INIZIALE = {
         "be_lock": round(405.12 * (1.0 + PARAMS_MERCATO["USA"]["be_lock"]), 4),
         "be_lock_pct": PARAMS_MERCATO["USA"]["be_lock"],
         "be_attivo": False,
-        "data_in": datetime.now().strftime("%Y-%m-%d"),
+        "data_in": "2026-11-12",
     }
 }
 
@@ -461,15 +468,16 @@ def calcola_backtest_storico():
     df_tot_ottimale = pd.concat([df_ita[df_ita["confluenze"] >= 1], df_usa_conf2])
 
     righe = [
-        "🧪 **AUDIT BACKTEST DEFINITIVO (2Y — SMA200 + BE +2.5%)**",
+        "🧪 **AUDIT BACKTEST PANIERE ESTESO (2Y — 36 ITA + 30 USA)**",
         "*(ITA: Size €1.000 Fee €3 | USA: Size €2.000 Fee €16.50, TP +4.5%)*",
         "━━━━━━━━━━━━━━━━━━━━",
-        fmt_riga("1. 🇮🇹 PIAZZA AFFARI (Tutti i segnali)", df_ita),
+        fmt_riga("1. 🇮🇹 PIAZZA AFFARI 36 TITOLI (Tutti)", df_ita),
         fmt_riga("2. 🇮🇹 PIAZZA AFFARI (Confluence >= 1)", df_ita[df_ita["confluenze"] >= 1]),
+        fmt_riga("3. 🇮🇹 PIAZZA AFFARI SNIPER (>= 2 Conf.)", df_ita[df_ita["confluenze"] >= 2]),
         "━━━━━━━━━━━━━━━━━━━━",
-        fmt_riga("3. 🇺🇸 WALL STREET (Tutti - Size €2.000)", df_usa_all),
-        fmt_riga("4. 🇺🇸 WALL STREET SNIPER (>= 2 Confluenze)", df_usa_conf2),
-        fmt_riga("5. 💡 USA comprati su GEM Milano (Size €1k, Fee €3)", df_usa_conf2, "pnl_gem", "win_gem"),
+        fmt_riga("4. 🇺🇸 WALL STREET (Tutti - Size €2.000)", df_usa_all),
+        fmt_riga("5. 🇺🇸 WALL STREET SNIPER (>= 2 Conf.)", df_usa_conf2),
+        fmt_riga("6. 💡 USA comprati su GEM Milano (Size €1k, Fee €3)", df_usa_conf2, "pnl_gem", "win_gem"),
         "━━━━━━━━━━━━━━━━━━━━",
         fmt_riga("🏆 PORTAFOGLIO COMBINATO (ITA>=1 + USA>=2)", df_tot_ottimale),
     ]
@@ -499,10 +507,10 @@ def menu_cockpit_tastiera():
     return InlineKeyboardMarkup(keyboard)
 
 TESTO_COCKPIT = (
-    "🧭 **COCKPIT QUANTITATIVO — FTSE MIB 🇮🇹 & WALL STREET 🇺🇸**\n"
+    "🧭 **COCKPIT QUANTITATIVO — 36 TITOLI ITA 🇮🇹 & 30 USA 🇺🇸**\n"
     "*(3 Confluenze Pure: Fibo, BB, MACD | Breakeven Rapido +2.5%)*\n\n"
     "🟢 **FASE 1 — DECISIONE & ORARI IDEALI**\n"
-    "• `/scan` — Cerca i segnali **Score 100%** e ne verifica la freschezza\n"
+    "• `/scan` — Cerca i segnali **Score 100%** su 66 titoli e ne verifica la freschezza\n"
     "• `/top10` — Watchlist dei 12 titoli più vicini al trigger\n"
     "• `/mercato` — Filtro regime su FTSE MIB e S&P 500 (SMA 200)\n"
     "• ⏰ *Orari:* Italia/GEM `09:00–17:30` | Wall Street `15:30–22:00`\n\n"
@@ -514,7 +522,7 @@ TESTO_COCKPIT = (
     "• `/vendi TICKER PREZZO` — Chiude posizione e calcola P&L netto\n\n"
     "🔵 **FASE 3 — ARCHIVIO & BACKTEST STORICO**\n"
     "• `/statistiche` — Bilancio netto, Win Rate e Profit Factor\n"
-    "• `/backtest` — Backtest 2Y separato per Italia, USA (Size €2k) e GEM"
+    "• `/backtest` — Backtest 2Y sui 66 titoli (36 Italia + 30 USA + GEM)"
 )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -524,8 +532,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     wait_msg = await msg.reply_text(
-        "⏳ *Avvio Backtest Definitivo (2 Anni su 54 titoli ITA + USA)...*\n"
-        "*(Attendere circa 20 secondi)*",
+        "⏳ *Avvio Backtest Paniere Esteso (2 Anni su 66 titoli: 36 ITA + 30 USA)...*\n"
+        "*(Attendere circa 20-25 secondi)*",
         parse_mode="Markdown"
     )
     report = await asyncio.to_thread(calcola_backtest_storico)
@@ -555,7 +563,7 @@ async def mercato_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    wait_msg = await msg.reply_text("⏳ *Scansione quantitativa in corso su 54 titoli (FTSE MIB 🇮🇹 + Wall Street 🇺🇸)...*", parse_mode="Markdown")
+    wait_msg = await msg.reply_text("⏳ *Scansione quantitativa in corso su 66 titoli (36 FTSE MIB 🇮🇹 + 30 Wall Street 🇺🇸)...*", parse_mode="Markdown")
 
     portafoglio = carica_json(PORTAFOGLIO_FILE, {})
     candidati, _, regime = await asyncio.to_thread(esegui_scansione_mercato)
@@ -579,7 +587,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🏛️ **Regimi:** 🇮🇹 MIB {'✅' if ita_ok else '⛔'} | 🇺🇸 S&P 500 {'✅' if usa_ok else '⛔'}\n"
             f"🔍 **NESSUN SEGNALE 'SCORE 100%' OGGI**\n"
             f"━━━━━━━━━━━━━━━━━━━━\n"
-            f"Nessun titolo su 54 (ITA + USA) presenta contemporaneamente:\n"
+            f"Nessun titolo su 66 (36 ITA + 30 USA) presenta contemporaneamente:\n"
             f"1. Trend rialzista (`P > SMA50 > SMA200`)\n"
             f"2. Ipervenduto marcato (`RSI Ieri <= {RSI_MAX_TRIGGER}`)\n"
             f"3. Candela verde di inversione (`Close > Open` e `Close > Ieri`)\n\n"
@@ -589,7 +597,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     blocchi_testo = [
-        f"🎯 **SEGNALI RILEVATI ({len(candidati)} Titoli a Score 100%)**",
+        f"🎯 **SEGNALI RILEVATI ({len(candidati)} Titoli a Score 100% su 66)**",
         f"🏛️ Regimi: 🇮🇹 MIB {'✅' if ita_ok else '⛔'} | 🇺🇸 S&P 500 {'✅' if usa_ok else '⛔'}",
         "━━━━━━━━━━━━━━━━━━━━"
     ]
@@ -633,7 +641,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    wait_msg = await msg.reply_text("⏳ *Elaborazione Watchlist Top 12 (Piazza Affari + Wall Street)...*", parse_mode="Markdown")
+    wait_msg = await msg.reply_text("⏳ *Elaborazione Watchlist Top 12 su 66 titoli (36 ITA + 30 USA)...*", parse_mode="Markdown")
 
     _, classifica, regime = await asyncio.to_thread(esegui_scansione_mercato)
     if not classifica:
@@ -644,7 +652,7 @@ async def top10_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     usa_ok = regime["USA"]["ok"]
 
     righe = [
-        "📊 **WATCHLIST TOP 12 — PROSSIMITÀ AL TRIGGER (ITA & USA)**",
+        "📊 **WATCHLIST TOP 12 — PROSSIMITÀ AL TRIGGER (66 TITOLI)**",
         f"🏛️ Regimi: 🇮🇹 MIB {'✅ Sano' if ita_ok else '⛔ Sotto SMA'} | 🇺🇸 S&P {'✅ Sano' if usa_ok else '⛔ Sotto SMA'}",
         "━━━━━━━━━━━━━━━━━━━━",
     ]
@@ -968,7 +976,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot Quantitativo Definitivo in ascolto su Telegram...")
+    logger.info("Bot Quantitativo 66 Titoli in ascolto su Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
