@@ -25,7 +25,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Lock per garantire che yfinance non mescoli mai i prezzi tra due chiamate
 YF_LOCK = Lock()
 
 # ==============================================================================
@@ -53,31 +52,27 @@ TICKERS_USA = [
     "WMT", "COST", "HD", "PG", "KO", "DIS"
 ]
 
-# Sottoinsieme di Big Tech USA negoziabili anche su Borsa Italiana GEM (a €3 di fee)
 BIG_TECH_GEM = {"AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD", "NFLX", "INTC"}
-
 TICKERS = TICKERS_ITA + TICKERS_USA
 
-# Parametri Core
 RSI_MAX_TRIGGER = 36.0
 SL_ATR_MULT = 1.5
 MAX_GIORNI_HOLD = 15
 
-# Parametri Specifici per Mercato (Ripristinato Breakeven rapido +2.5% anche su USA con Size €2.000)
 PARAMS_MERCATO = {
     "ITA": {
-        "tp_pct": 0.042,       # +4.2% Take Profit Italia
-        "be_trig": 0.025,      # +2.5% Attivazione Breakeven
-        "be_lock": 0.018,      # +1.8% Stop Protetto (+€15.00 netti su €1.000)
-        "fee": 3.0,            # €1.50 + €1.50 su Borsa Italiana
-        "cap_def": 1000.0,     # Taglia standard Italia €1.000 (personalizzabile)
+        "tp_pct": 0.042,
+        "be_trig": 0.025,
+        "be_lock": 0.018,
+        "fee": 3.0,
+        "cap_def": 1000.0,
     },
     "USA": {
-        "tp_pct": 0.045,       # +4.5% Take Profit USA (+€73.50 netti su €2.000)
-        "be_trig": 0.025,      # +2.5% Attivazione Breakeven rapida (evita che +3% diventi Stop Loss!)
-        "be_lock": 0.018,      # +1.8% Stop Protetto (+€19.50 netti su €2.000 pagate le fee USA)
-        "fee": 16.5,           # $9.00 + $9.00 su NYSE/NASDAQ (~€16.50)
-        "cap_def": 2000.0,     # Taglia consigliata Wall Street €2.000 per abbattere le fee fisse
+        "tp_pct": 0.045,
+        "be_trig": 0.025,
+        "be_lock": 0.018,
+        "fee": 16.5,
+        "cap_def": 2000.0,
     }
 }
 
@@ -89,7 +84,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot Quantitativo Dual-Market (ITA + USA) Operativo.")
+        self.wfile.write(b"Bot Quantitativo Dual-Market Operativo.")
 
     def log_message(self, format, *args):
         return
@@ -105,27 +100,64 @@ def avvia_keep_alive():
     t.start()
 
 # ==============================================================================
-# 3. GESTIONE DATABASE LOCALE (JSON) & DOWNLOAD PREZZI REALI
+# 3. GESTIONE DATABASE BLINDATA (RAM + JSON) CON POSIZIONE UNH PRE-CARICATA
 # ==============================================================================
+PORTAFOGLIO_INIZIALE = {
+    "UNH": {
+        "ticker_full": "UNH",
+        "mercato": "USA",
+        "valuta": "$",
+        "flag": "🇺🇸",
+        "prezzo_in": 405.12,
+        "capitale": 1120.0,
+        "tp": round(405.12 * (1.0 + PARAMS_MERCATO["USA"]["tp_pct"]), 4),
+        "tp_pct": PARAMS_MERCATO["USA"]["tp_pct"],
+        "sl": 388.46,
+        "be_trigger": round(405.12 * (1.0 + PARAMS_MERCATO["USA"]["be_trig"]), 4),
+        "be_trig_pct": PARAMS_MERCATO["USA"]["be_trig"],
+        "be_lock": round(405.12 * (1.0 + PARAMS_MERCATO["USA"]["be_lock"]), 4),
+        "be_lock_pct": PARAMS_MERCATO["USA"]["be_lock"],
+        "be_attivo": False,
+        "data_in": datetime.now().strftime("%Y-%m-%d"),
+    }
+}
+
+MEM_STORE = {
+    PORTAFOGLIO_FILE: None,
+    STORICO_FILE: None
+}
+
 def carica_json(percorso, default):
+    if MEM_STORE.get(percorso) is not None:
+        return MEM_STORE[percorso]
     if os.path.exists(percorso):
         try:
             with open(percorso, "r", encoding="utf-8") as f:
-                return json.load(f)
+                dati = json.load(f)
+                if dati:
+                    MEM_STORE[percorso] = dati
+                    return dati
         except Exception:
-            return default
+            pass
+    if percorso == PORTAFOGLIO_FILE and not default:
+        MEM_STORE[percorso] = PORTAFOGLIO_INIZIALE.copy()
+        return MEM_STORE[percorso]
+    MEM_STORE[percorso] = default
     return default
 
 def salva_json(percorso, dati):
-    with open(percorso, "w", encoding="utf-8") as f:
-        json.dump(dati, f, indent=4, ensure_ascii=False)
+    MEM_STORE[percorso] = dati
+    try:
+        with open(percorso, "w", encoding="utf-8") as f:
+            json.dump(dati, f, indent=4, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Errore scrittura file {percorso}: {e}")
 
 def is_mercato_ita(ticker_str):
     t = ticker_str.upper().replace(".MI", "")
     return f"{t}.MI" in TICKERS_ITA or ticker_str.upper().endswith(".MI")
 
 def scarica_ticker_sicuro(simbolo, periodo="1y"):
-    """Scarica un singolo ticker con auto_adjust=False (Prezzi Reali di Borsa identici a Directa)."""
     with YF_LOCK:
         try:
             t_obj = yf.Ticker(simbolo)
@@ -142,7 +174,7 @@ def scarica_ticker_sicuro(simbolo, periodo="1y"):
             return pd.DataFrame()
 
 # ==============================================================================
-# 4. MOTORE DI ANALISI QUANTITATIVA & 3 CONFLUENZE PURE (FIBO, BB, MACD)
+# 4. MOTORE DI ANALISI QUANTITATIVA & 3 CONFLUENZE PURE
 # ==============================================================================
 def prepara_indicatori_completi(df):
     d = df.copy()
@@ -153,35 +185,27 @@ def prepara_indicatori_completi(df):
     h = d["High"]
     l = d["Low"]
 
-    # 1. SMA 50 & 200
     d["sma50"] = c.rolling(50).mean()
     d["sma200"] = c.rolling(200).mean()
 
-    # 2. RSI(14)
     delta = c.diff()
     g = delta.where(delta > 0, 0.0).rolling(14).mean()
     loss = (-delta.where(delta < 0, 0.0)).rolling(14).mean()
     rs = g / loss.replace(0, np.nan)
     d["rsi"] = (100 - (100 / (1 + rs))).fillna(50)
 
-    # 3. ATR(14)
-    tr = pd.concat(
-        [h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1
-    ).max(axis=1)
+    tr = pd.concat([h - l, (h - c.shift(1)).abs(), (l - c.shift(1)).abs()], axis=1).max(axis=1)
     d["atr"] = tr.rolling(14).mean()
 
-    # 4. Fibonacci Retracement (Swing 60 sedute)
     roll_max = h.rolling(60).max().shift(1)
     roll_min = l.rolling(60).min().shift(1)
     rng = (roll_max - roll_min).replace(0, np.nan)
     d["fib_retr"] = ((roll_max - c.shift(1)) / rng) * 100.0
 
-    # 5. Bollinger Bands (20, 2)
     sma20 = c.rolling(20).mean()
     std20 = c.rolling(20).std()
     d["bb_lower"] = sma20 - 2.0 * std20
 
-    # 6. MACD Histogram (12, 26, 9)
     ema12 = c.ewm(span=12, adjust=False).mean()
     ema26 = c.ewm(span=26, adjust=False).mean()
     macd_line = ema12 - ema26
@@ -191,7 +215,6 @@ def prepara_indicatori_completi(df):
     return d
 
 def verifica_regime_indice(simbolo):
-    """Controlla se l'indice (FTSEMIB.MI o ^GSPC) staziona sopra la SMA 200."""
     df_idx = scarica_ticker_sicuro(simbolo, periodo="1y")
     if df_idx.empty or len(df_idx) < 200:
         return True, 0.0, 0.0, 0.0
@@ -202,7 +225,6 @@ def verifica_regime_indice(simbolo):
     return (close_val >= sma200_val), close_val, sma200_val, dist_pct
 
 def esegui_scansione_mercato():
-    """Analizza tutti i 54 titoli (ITA + USA) separando i segnali freschi da quelli già partiti."""
     mib_ok, mib_p, mib_sma, mib_dist = verifica_regime_indice("FTSEMIB.MI")
     sp_ok, sp_p, sp_sma, sp_dist = verifica_regime_indice("^GSPC")
 
@@ -244,12 +266,10 @@ def esegui_scansione_mercato():
             regime_ok = mib_ok if is_ita else sp_ok
             prm = PARAMS_MERCATO[mercato]
 
-            # 3 Pilastri Core
             cond_trend = (p_prev > s50_prev > s200_prev)
             cond_rsi = (rsi_prev <= RSI_MAX_TRIGGER)
             cond_reversal = (p > op and p > p_prev)
 
-            # Controllo di freschezza del segnale (quanto è già salito oggi rispetto a ieri)
             rimbalzo_oggi_pct = ((p - p_prev) / p_prev) * 100.0
             segnale_fresco = (rimbalzo_oggi_pct <= 2.2) and (rsi_oggi <= 44.0)
 
@@ -259,7 +279,6 @@ def esegui_scansione_mercato():
             if cond_rsi: score += 20
             if cond_reversal: score += 20
 
-            # 3 Confluenze Pure (Fibonacci, Bollinger, MACD Tick-Up)
             f_fibo = (30.0 <= float(row_ieri["fib_retr"]) <= 68.0)
             f_bb = (float(row_ieri["Low"]) <= float(row_ieri["bb_lower"]) * 1.008) or (float(row_oggi["Low"]) <= float(row_oggi["bb_lower"]) * 1.008)
             f_macd = (float(row_oggi["macd_hist"]) > float(row_ieri["macd_hist"]))
@@ -321,7 +340,6 @@ def esegui_scansione_mercato():
     return candidati_sniper, classifica_completa, regime_info
 
 def calcola_backtest_storico():
-    """Backtest completo sugli ultimi 2 anni: mostra Italia, Wall Street (Size €2.000) e GEM (€3 fee)."""
     df_mib = scarica_ticker_sicuro("FTSEMIB.MI", periodo="2y")
     df_sp = scarica_ticker_sicuro("^GSPC", periodo="2y")
 
@@ -346,8 +364,8 @@ def calcola_backtest_storico():
             is_ita = ticker.endswith(".MI")
             mercato = "ITA" if is_ita else "USA"
             prm = PARAMS_MERCATO[mercato]
-            cap_test = prm["cap_def"]     # €1.000 per ITA, €2.000 per USA
-            fee = prm["fee"]              # €3.00 per ITA, €16.50 per USA
+            cap_test = prm["cap_def"]
+            fee = prm["fee"]
             bull_map = mib_bull_series if is_ita else sp_bull_series
 
             n_rows = len(d)
@@ -400,7 +418,6 @@ def calcola_backtest_storico():
 
                     ret_pct = (p_out - p_in) / p_in
                     pnl_netto = (ret_pct * cap_test) - fee
-                    # Simulazione parallela: stesso trade USA se eseguito su GEM Milano (Size €1.000, Fee €3.00)
                     pnl_gem_1k = (ret_pct * 1000.0) - 3.0
 
                     tutti_i_segnali.append({
@@ -507,7 +524,7 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def backtest_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     wait_msg = await msg.reply_text(
-        "⏳ *Avvio Backtest Definitivo (2 Anni su 54 titoli ITA + USA con Breakeven +2.5% e spaccato GEM)...*\n"
+        "⏳ *Avvio Backtest Definitivo (2 Anni su 54 titoli ITA + USA)...*\n"
         "*(Attendere circa 20 secondi)*",
         parse_mode="Markdown"
     )
@@ -587,7 +604,6 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         gain_netto = (cap_sim * top["tp_pct"]) - fee_sim
         rischio_pct = ((top["prezzo"] - top["sl"]) / top["prezzo"]) * 100.0
 
-        # Indicatore di Attendibilità / Timing Live (risponde esattamente al caso UNH!)
         if top["fresco"]:
             stato_timing = f"🟢 **SEGNALE FRESCO ATTIVO** *(Oggi {top['rimbalzo_oggi_pct']:+.2f}%, RSI {top['rsi_oggi']:.1f})*"
         else:
@@ -657,9 +673,8 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️ **Uso corretto:** `/compra TICKER PREZZO [CAPITALE_EUR]`\n"
             "Esempi:\n"
-            "• `/compra ENI 24.75 1000` (Italia — Fee €3)\n"
-            "• `/compra UNH 405.12 2000` (USA — Fee €16.50)\n"
-            "• `/compra AAPL.MI 320.50 1000` (USA su GEM Milano — Fee €3)",
+            "• `/compra ENI 24.75 1000`\n"
+            "• `/compra UNH 405.12 1120`",
             parse_mode="Markdown",
         )
         return
@@ -721,7 +736,7 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"💶 Prezzo Carico: **{valuta}{prezzo_in:.4f}** (Taglia: **€{capitale:.0f}**)\n"
         f"🎯 Take Profit (+{prm['tp_pct']*100:.1f}%): **{valuta}{tp_price:.4f}**\n"
         f"🛡️ Stop Loss (1.5x ATR): **{valuta}{sl_iniziale:.4f}**\n"
-        f"🔒 Trigger Breakeven (+{prm['be_trig']*100:.1f}%): **{valuta}{be_trigger:.4f}** *(Stop sale a {valuta}{be_lock:.4f} | +{prm['be_lock']*100:.1f}%)*",
+        f"🔒 Trigger Breakeven (+{prm['be_trig']*100:.1f}%): **{valuta}{be_trigger:.4f}** *(Stop sale a {valuta}{be_lock:.4f})*",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
     )
@@ -732,13 +747,13 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not portafoglio:
         await msg.reply_text(
-            "💼 **PORTAFOGLIO ATTIVO VUOTO**\nNessuna operazione aperta al momento. Usa `/scan` per cercare un setup.",
+            "💼 **PORTAFOGLIO ATTIVO VUOTO**\nNessuna operazione aperta al momento.",
             parse_mode="Markdown",
             reply_markup=menu_cockpit_tastiera(),
         )
         return
 
-    wait_msg = await msg.reply_text("⏳ *Aggiornamento quotazioni live ITA/USA e verifica livelli...*", parse_mode="Markdown")
+    wait_msg = await msg.reply_text("⏳ *Aggiornamento quotazioni live e verifica livelli...*", parse_mode="Markdown")
     righe = ["💼 **MONITORAGGIO PORTAFOGLIO LIVE**", "━━━━━━━━━━━━━━━━━━━━"]
     modificato = False
 
@@ -787,7 +802,7 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   {icona_pnl} Var: **{var_pct:+.2f}%** | P&L Netto Fee: **€{pnl_netto:+.2f}**\n"
             f"   🎯 TP: `{val}{pos['tp']:.2f}` | 🛡️ SL: `{val}{pos['sl']:.2f}`\n"
             f"   ⏱️ Giorni: {giorni_trascorsi}/{MAX_GIORNI_HOLD} | {avviso_azione}\n"
-            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.2f}`\n"
+            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.4f}`\n"
         )
 
     if modificato:
@@ -909,6 +924,8 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global PORTAFOGLIO_INIZIALE
+    PORTAFOGLIO_INIZIALE = {}
     salva_json(PORTAFOGLIO_FILE, {})
     await update.message.reply_text(
         "🧹 **Portafoglio attivo azzerato con successo.**",
@@ -951,7 +968,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot Quantitativo Dual-Market Definitivo in ascolto su Telegram...")
+    logger.info("Bot Quantitativo Definitivo in ascolto su Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
