@@ -1,5 +1,6 @@
 import os
 import json
+import uuid
 import logging
 import warnings
 import asyncio
@@ -26,6 +27,8 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 YF_LOCK = Lock()
+# Identificativo univoco del server (ti permette di vedere subito se ci sono 2 bot accesi)
+SERVER_NODE_ID = str(uuid.uuid4())[:4].upper()
 
 # ==============================================================================
 # 1. CONFIGURAZIONE E PANIERE ESTESO (36 ITALIA + 30 WALL STREET)
@@ -36,22 +39,16 @@ PORT = int(os.environ.get("PORT", 10000))
 PORTAFOGLIO_FILE = "portafoglio.json"
 STORICO_FILE = "storico_trades.json"
 
-# 36 Titoli Liquidi Piazza Affari (FTSE MIB Completo & Top Mid Cap - Fee €3.00)
 TICKERS_ITA = [
-    # Banche, Assicurazioni & Finanza
     "ISP.MI", "UCG.MI", "BAMI.MI", "BPE.MI", "BMED.MI", "FBK.MI",
     "MB.MI", "BMPS.MI", "BPSO.MI", "AZM.MI", "G.MI", "PST.MI",
-    # Energia & Utility
     "ENI.MI", "ENEL.MI", "TRN.MI", "SRG.MI", "IG.MI", "A2A.MI",
     "HER.MI", "IRE.MI", "TEN.MI",
-    # Industria, Tech, Auto & Infrastrutture
     "RACE.MI", "STLAM.MI", "STMMI.MI", "PRY.MI", "LDO.MI", "BZU.MI",
     "MAIRE.MI", "WBD.MI",
-    # Lusso, Salute & Largo Consumo
     "MONC.MI", "BC.MI", "SFER.MI", "OVS.MI", "CPR.MI", "REC.MI", "AMP.MI"
 ]
 
-# 30 Titoli Liquidi Wall Street (NYSE / NASDAQ)
 TICKERS_USA = [
     "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "TSLA", "AMD",
     "AVGO", "NFLX", "CRM", "ADBE", "ORCL", "INTC", "CSCO", "QCOM",
@@ -91,7 +88,7 @@ class KeepAliveHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
-        self.wfile.write(b"Bot Quantitativo 66 Titoli (36 ITA + 30 USA) Operativo.")
+        self.wfile.write(f"Bot Quantitativo Operativo - Nodo {SERVER_NODE_ID}".encode("utf-8"))
 
     def log_message(self, format, *args):
         return
@@ -107,7 +104,7 @@ def avvia_keep_alive():
     t.start()
 
 # ==============================================================================
-# 3. GESTIONE DATABASE BLINDATA (RAM + JSON) CON POSIZIONE UNH PRE-CARICATA
+# 3. DATABASE PERSISTENTE TRIPLO STRATO (RAM + JSON + TELEGRAM CLOUD PIN)
 # ==============================================================================
 PORTAFOGLIO_INIZIALE = {
     "UNH": {
@@ -126,6 +123,23 @@ PORTAFOGLIO_INIZIALE = {
         "be_lock_pct": PARAMS_MERCATO["USA"]["be_lock"],
         "be_attivo": False,
         "data_in": "2026-11-12",
+    },
+    "ENI": {
+        "ticker_full": "ENI.MI",
+        "mercato": "ITA",
+        "valuta": "€",
+        "flag": "🇮🇹",
+        "prezzo_in": 25.08,
+        "capitale": 1000.0,
+        "tp": round(25.08 * (1.0 + PARAMS_MERCATO["ITA"]["tp_pct"]), 4),
+        "tp_pct": PARAMS_MERCATO["ITA"]["tp_pct"],
+        "sl": 24.32,
+        "be_trigger": round(25.08 * (1.0 + PARAMS_MERCATO["ITA"]["be_trig"]), 4),
+        "be_trig_pct": PARAMS_MERCATO["ITA"]["be_trig"],
+        "be_lock": round(25.08 * (1.0 + PARAMS_MERCATO["ITA"]["be_lock"]), 4),
+        "be_lock_pct": PARAMS_MERCATO["ITA"]["be_lock"],
+        "be_attivo": False,
+        "data_in": "2026-11-13",
     }
 }
 
@@ -133,6 +147,8 @@ MEM_STORE = {
     PORTAFOGLIO_FILE: None,
     STORICO_FILE: None
 }
+
+CLOUD_PIN_HEADER = "☁️_CLOUD_PORTFOLIO_SYNC_☁️\n"
 
 def carica_json(percorso, default):
     if MEM_STORE.get(percorso) is not None:
@@ -147,7 +163,8 @@ def carica_json(percorso, default):
         except Exception:
             pass
     if percorso == PORTAFOGLIO_FILE and not default:
-        MEM_STORE[percorso] = PORTAFOGLIO_INIZIALE.copy()
+        MEM_STORE[percorso] = json.loads(json.dumps(PORTAFOGLIO_INIZIALE))
+        salva_json(PORTAFOGLIO_FILE, MEM_STORE[percorso])
         return MEM_STORE[percorso]
     MEM_STORE[percorso] = default
     return default
@@ -159,6 +176,43 @@ def salva_json(percorso, dati):
             json.dump(dati, f, indent=4, ensure_ascii=False)
     except Exception as e:
         logger.error(f"Errore scrittura file {percorso}: {e}")
+
+async def sincronizza_da_telegram_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Legge il messaggio fissato nella chat Telegram per recuperare sempre il portafoglio aggiornato."""
+    try:
+        chat_id = update.effective_chat.id
+        chat_obj = await context.bot.get_chat(chat_id)
+        pinned = chat_obj.pinned_message
+        if pinned and pinned.text and CLOUD_PIN_HEADER in pinned.text:
+            raw_json = pinned.text.split(CLOUD_PIN_HEADER, 1)[1].strip()
+            dati_cloud = json.loads(raw_json)
+            if isinstance(dati_cloud, dict):
+                salva_json(PORTAFOGLIO_FILE, dati_cloud)
+                return dati_cloud
+    except Exception as e:
+        logger.debug(f"Sync lectura cloud non disponibile: {e}")
+    return carica_json(PORTAFOGLIO_FILE, {})
+
+async def salva_su_telegram_cloud(update: Update, context: ContextTypes.DEFAULT_TYPE, portafoglio_dict):
+    """Salva il portafoglio sia su RAM/disco sia fissando un messaggio di backup nella chat Telegram."""
+    salva_json(PORTAFOGLIO_FILE, portafoglio_dict)
+    try:
+        chat_id = update.effective_chat.id
+        testo_backup = f"{CLOUD_PIN_HEADER}{json.dumps(portafoglio_dict, ensure_ascii=False)}"
+        chat_obj = await context.bot.get_chat(chat_id)
+        pinned = chat_obj.pinned_message
+
+        if pinned and pinned.from_user and pinned.from_user.is_bot and pinned.text and CLOUD_PIN_HEADER in pinned.text:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=pinned.message_id,
+                text=testo_backup
+            )
+        else:
+            msg_pin = await context.bot.send_message(chat_id=chat_id, text=testo_backup)
+            await context.bot.pin_chat_message(chat_id=chat_id, message_id=msg_pin.message_id, disable_notification=True)
+    except Exception as e:
+        logger.warning(f"Impossibile aggiornare messaggio fissato Cloud: {e}")
 
 def is_mercato_ita(ticker_str):
     t = ticker_str.upper().replace(".MI", "")
@@ -507,22 +561,19 @@ def menu_cockpit_tastiera():
     return InlineKeyboardMarkup(keyboard)
 
 TESTO_COCKPIT = (
-    "🧭 **COCKPIT QUANTITATIVO — 36 TITOLI ITA 🇮🇹 & 30 USA 🇺🇸**\n"
-    "*(3 Confluenze Pure: Fibo, BB, MACD | Breakeven Rapido +2.5%)*\n\n"
+    f"🧭 **COCKPIT QUANTITATIVO — 36 ITA 🇮🇹 & 30 USA 🇺🇸**\n"
+    f"*(Cloud-Sync Attivo ☁️ | Server Nodo: `{SERVER_NODE_ID}`)*\n\n"
     "🟢 **FASE 1 — DECISIONE & ORARI IDEALI**\n"
-    "• `/scan` — Cerca i segnali **Score 100%** su 66 titoli e ne verifica la freschezza\n"
+    "• `/scan` — Cerca i segnali **Score 100%** su 66 titoli\n"
     "• `/top10` — Watchlist dei 12 titoli più vicini al trigger\n"
-    "• `/mercato` — Filtro regime su FTSE MIB e S&P 500 (SMA 200)\n"
-    "• ⏰ *Orari:* Italia/GEM `09:00–17:30` | Wall Street `15:30–22:00`\n\n"
-    "🟡 **FASE 2 — REGOLE DI PROFITTO (ITA vs USA)**\n"
-    "• 🇮🇹 **Italia (Fee €3):** Size `€1.000` | TP `+4.2%` | BE a `+2.5%` (Stop `+1.8%`)\n"
-    "• 🇺🇸 **USA (Fee €16.50):** Size `€2.000` (o su GEM `.MI` a €3 fee) | TP `+4.5%` | BE a `+2.5%`\n"
-    "• `/portafoglio` — Monitora posizioni, Breakeven e uscite\n"
-    "• `/compra TICKER PREZZO [CAPITALE]` — Registra ingresso\n"
+    "• `/mercato` — Filtro regime su FTSE MIB e S&P 500 (SMA 200)\n\n"
+    "🟡 **FASE 2 — GESTIONE PORTAFOGLIO CLOUD**\n"
+    "• `/portafoglio` — Monitora `UNH`, `ENI` e tutte le posizioni\n"
+    "• `/compra TICKER PREZZO [CAPITALE]` — Registra e fissa in Cloud\n"
     "• `/vendi TICKER PREZZO` — Chiude posizione e calcola P&L netto\n\n"
     "🔵 **FASE 3 — ARCHIVIO & BACKTEST STORICO**\n"
-    "• `/statistiche` — Bilancio netto, Win Rate e Profit Factor\n"
-    "• `/backtest` — Backtest 2Y sui 66 titoli (36 Italia + 30 USA + GEM)"
+    "• `/statistiche` — Bilancio netto, Win Rate e Zainetto Fiscale\n"
+    "• `/backtest` — Backtest 2Y sui 66 titoli"
 )
 
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -557,7 +608,7 @@ async def mercato_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Stato: {stato_usa}\n"
         f"Valore: **{sp_p:,.0f} pt** | SMA 200: **{sp_sma:,.0f} pt** (**{sp_dist:+.2f}%**)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Il bot abilita gli ingressi su ciascun mercato solo quando il rispettivo indice è sopra la SMA 200.*"
+        f"🆔 *Nodo Server: `{SERVER_NODE_ID}`*"
     )
     await msg.reply_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
@@ -565,7 +616,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
     wait_msg = await msg.reply_text("⏳ *Scansione quantitativa in corso su 66 titoli (36 FTSE MIB 🇮🇹 + 30 Wall Street 🇺🇸)...*", parse_mode="Markdown")
 
-    portafoglio = carica_json(PORTAFOGLIO_FILE, {})
+    portafoglio = await sincronizza_da_telegram_cloud(update, context)
     candidati, _, regime = await asyncio.to_thread(esegui_scansione_mercato)
 
     ita_ok = regime["ITA"]["ok"]
@@ -591,7 +642,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"1. Trend rialzista (`P > SMA50 > SMA200`)\n"
             f"2. Ipervenduto marcato (`RSI Ieri <= {RSI_MAX_TRIGGER}`)\n"
             f"3. Candela verde di inversione (`Close > Open` e `Close > Ieri`)\n\n"
-            f"💡 *Disciplina Sniper: attendere l'allineamento perfetto. Controlla `/top10` per i titoli più vicini.*"
+            f"💡 *Controlla `/top10` per i titoli più vicini.*"
         )
         await wait_msg.edit_text(testo, parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
         return
@@ -635,7 +686,7 @@ async def scan_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         blocchi_testo.append(blocco)
 
     if len(portafoglio) > 0:
-        blocchi_testo.append(f"⚠️ *Nota: Hai già {len(portafoglio)} posizione/i attiva/e in portafoglio.*")
+        blocchi_testo.append(f"⚠️ *Hai già {len(portafoglio)} posizione/i attiva/e in portafoglio.*")
 
     await wait_msg.edit_text("\n".join(blocchi_testo), parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
@@ -681,7 +732,7 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             "⚠️ **Uso corretto:** `/compra TICKER PREZZO [CAPITALE_EUR]`\n"
             "Esempi:\n"
-            "• `/compra ENI 24.75 1000`\n"
+            "• `/compra ENI 25.08 1000`\n"
             "• `/compra UNH 405.12 1120`",
             parse_mode="Markdown",
         )
@@ -712,12 +763,13 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    tp_price = prezzo_in * (1.0 + prm["tp_pct"])
-    sl_iniziale = prezzo_in - (SL_ATR_MULT * atr_val)
-    be_trigger = prezzo_in * (1.0 + prm["be_trig"])
-    be_lock = prezzo_in * (1.0 + prm["be_lock"])
+    tp_price = round(prezzo_in * (1.0 + prm["tp_pct"]), 4)
+    sl_iniziale = round(prezzo_in - (SL_ATR_MULT * atr_val), 4)
+    be_trigger = round(prezzo_in * (1.0 + prm["be_trig"]), 4)
+    be_lock = round(prezzo_in * (1.0 + prm["be_lock"]), 4)
 
-    portafoglio = carica_json(PORTAFOGLIO_FILE, {})
+    # 1. Legge prima dal Cloud Telegram per non perdere posizioni precedenti
+    portafoglio = await sincronizza_da_telegram_cloud(update, context)
     portafoglio[ticker_clean] = {
         "ticker_full": ticker_full,
         "mercato": mercato,
@@ -735,34 +787,39 @@ async def compra_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "be_attivo": False,
         "data_in": datetime.now().strftime("%Y-%m-%d"),
     }
-    salva_json(PORTAFOGLIO_FILE, portafoglio)
+    # 2. Salva in RAM, su File e fissa nel Cloud di Telegram
+    await salva_su_telegram_cloud(update, context, portafoglio)
 
     await update.message.reply_text(
-        f"✅ **POSIZIONE REGISTRATA IN PORTAFOGLIO**\n"
+        f"✅ **POSIZIONE REGISTRATA E SINCRONIZZATA IN CLOUD ☁️**\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📌 Titolo: {flag} **{ticker_clean}** ({mercato} — Fee €{prm['fee']:.2f})\n"
         f"💶 Prezzo Carico: **{valuta}{prezzo_in:.4f}** (Taglia: **€{capitale:.0f}**)\n"
         f"🎯 Take Profit (+{prm['tp_pct']*100:.1f}%): **{valuta}{tp_price:.4f}**\n"
         f"🛡️ Stop Loss (1.5x ATR): **{valuta}{sl_iniziale:.4f}**\n"
-        f"🔒 Trigger Breakeven (+{prm['be_trig']*100:.1f}%): **{valuta}{be_trigger:.4f}** *(Stop sale a {valuta}{be_lock:.4f})*",
+        f"🔒 Trigger Breakeven (+{prm['be_trig']*100:.1f}%): **{valuta}{be_trigger:.4f}** *(Stop sale a {valuta}{be_lock:.4f})*\n"
+        f"📂 Totale titoli in portafoglio: **{len(portafoglio)}** ({', '.join(portafoglio.keys())})",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
     )
 
 async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message or update.callback_query.message
-    portafoglio = carica_json(PORTAFOGLIO_FILE, {})
+    portafoglio = await sincronizza_da_telegram_cloud(update, context)
 
     if not portafoglio:
         await msg.reply_text(
-            "💼 **PORTAFOGLIO ATTIVO VUOTO**\nNessuna operazione aperta al momento.",
+            f"💼 **PORTAFOGLIO ATTIVO VUOTO** *(Nodo `{SERVER_NODE_ID}`)*\nNessuna operazione aperta al momento.",
             parse_mode="Markdown",
             reply_markup=menu_cockpit_tastiera(),
         )
         return
 
-    wait_msg = await msg.reply_text("⏳ *Aggiornamento quotazioni live e verifica livelli...*", parse_mode="Markdown")
-    righe = ["💼 **MONITORAGGIO PORTAFOGLIO LIVE**", "━━━━━━━━━━━━━━━━━━━━"]
+    wait_msg = await msg.reply_text("⏳ *Sincronizzazione Cloud e aggiornamento quotazioni live...*", parse_mode="Markdown")
+    righe = [
+        f"💼 **MONITORAGGIO PORTAFOGLIO LIVE ({len(portafoglio)} Titoli)**",
+        "━━━━━━━━━━━━━━━━━━━━"
+    ]
     modificato = False
 
     for ticker, pos in portafoglio.items():
@@ -810,11 +867,14 @@ async def portafoglio_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"   {icona_pnl} Var: **{var_pct:+.2f}%** | P&L Netto Fee: **€{pnl_netto:+.2f}**\n"
             f"   🎯 TP: `{val}{pos['tp']:.2f}` | 🛡️ SL: `{val}{pos['sl']:.2f}`\n"
             f"   ⏱️ Giorni: {giorni_trascorsi}/{MAX_GIORNI_HOLD} | {avviso_azione}\n"
-            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.4f}`\n"
+            f"   👉 Chiudi: `/vendi {ticker} {p_attuale:.2f}`\n"
         )
 
+    righe.append("━━━━━━━━━━━━━━━━━━━━")
+    righe.append(f"☁️ *Cloud-Sync Attivo | 🆔 Nodo Server: `{SERVER_NODE_ID}`*")
+
     if modificato:
-        salva_json(PORTAFOGLIO_FILE, portafoglio)
+        await salva_su_telegram_cloud(update, context, portafoglio)
 
     await wait_msg.edit_text("\n".join(righe), parse_mode="Markdown", reply_markup=menu_cockpit_tastiera())
 
@@ -822,7 +882,7 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     args = context.args
     if len(args) < 2:
         await update.message.reply_text(
-            "⚠️ **Uso corretto:** `/vendi TICKER PREZZO_USCITA`\nEsempio: `/vendi UNH 423.35`",
+            "⚠️ **Uso corretto:** `/vendi TICKER PREZZO_USCITA`\nEsempio: `/vendi ENI 26.13`",
             parse_mode="Markdown",
         )
         return
@@ -834,13 +894,15 @@ async def vendi_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Prezzo di uscita non valido.")
         return
 
-    portafoglio = carica_json(PORTAFOGLIO_FILE, {})
+    portafoglio = await sincronizza_da_telegram_cloud(update, context)
     if ticker_clean not in portafoglio:
         await update.message.reply_text(f"❌ Il titolo **{ticker_clean}** non è in portafoglio.", parse_mode="Markdown")
         return
 
     pos = portafoglio.pop(ticker_clean)
-    salva_json(PORTAFOGLIO_FILE, portafoglio)
+    if ticker_clean in PORTAFOGLIO_INIZIALE:
+        PORTAFOGLIO_INIZIALE.pop(ticker_clean, None)
+    await salva_su_telegram_cloud(update, context, portafoglio)
 
     mercato = pos.get("mercato", "ITA" if is_mercato_ita(pos["ticker_full"]) else "USA")
     prm = PARAMS_MERCATO[mercato]
@@ -934,9 +996,9 @@ async def statistiche_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global PORTAFOGLIO_INIZIALE
     PORTAFOGLIO_INIZIALE = {}
-    salva_json(PORTAFOGLIO_FILE, {})
+    await salva_su_telegram_cloud(update, context, {})
     await update.message.reply_text(
-        "🧹 **Portafoglio attivo azzerato con successo.**",
+        "🧹 **Portafoglio attivo e Cloud azzerati con successo.**",
         parse_mode="Markdown",
         reply_markup=menu_cockpit_tastiera(),
     )
@@ -959,7 +1021,7 @@ async def callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ==============================================================================
 def main():
     avvia_keep_alive()
-    logger.info(f"Server HTTP keep-alive avviato sulla porta {PORT}.")
+    logger.info(f"Server HTTP keep-alive avviato sulla porta {PORT} - Nodo {SERVER_NODE_ID}.")
 
     app = Application.builder().token(TOKEN).build()
 
@@ -976,7 +1038,7 @@ def main():
     app.add_handler(CommandHandler("reset", reset_cmd))
     app.add_handler(CallbackQueryHandler(callback_handler))
 
-    logger.info("Bot Quantitativo 66 Titoli in ascolto su Telegram...")
+    logger.info("Bot Quantitativo Cloud-Sync in ascolto su Telegram...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
